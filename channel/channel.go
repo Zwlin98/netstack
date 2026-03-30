@@ -1,3 +1,4 @@
+// Package channel definition for reading and writing IP packets.
 package channel
 
 // Channel is the abstraction for packet I/O.

@@ -1,3 +1,4 @@
+// Package packet provides a PacketBuffer type for efficient network packet
 package packet
 
 import "sync"
