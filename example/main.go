@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Zwlin98/netstack/channel/tun"
 	"github.com/Zwlin98/netstack/stack"
@@ -32,20 +33,20 @@ import (
 	"github.com/Zwlin98/netstack/transport/udp"
 )
 
-const (
-	tunName   = "tun0"
-	tunMTU    = 1500
-	tunSubnet = "10.0.0.0/24"
+var (
+	tunName    = flag.String("tun", "tun0", "TUN device name")
+	tunMTU     = flag.Int("mtu", 1500, "TUN MTU")
+	tunSubnet  = flag.String("subnet", "10.0.0.0/24", "route subnet for TUN device")
+	forwardAddr = flag.String("forward", "", "forward all TCP to this address (e.g. host:5201)")
+	readDelay   = flag.Duration("read-delay", 0, "delay between reads in echo handler (e.g. 50ms)")
 )
-
-var forwardAddr = flag.String("forward", "", "forward all TCP to this address (e.g. host:5201)")
 
 func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
 	// 1. Create TUN device.
-	ch, err := tun.NewChannel(tunName, tunMTU)
+	ch, err := tun.NewChannel(*tunName, *tunMTU)
 	if err != nil {
 		log.Fatalf("create tun: %v", err)
 	}
@@ -56,8 +57,8 @@ func main() {
 
 	// 2. Bring up interface and add route (no IP on TUN — avoids local routing).
 	run("ip", "link", "set", name, "up")
-	run("ip", "route", "add", tunSubnet, "dev", name)
-	log.Printf("configured %s route %s", name, tunSubnet)
+	run("ip", "route", "add", *tunSubnet, "dev", name)
+	log.Printf("configured %s route %s", name, *tunSubnet)
 
 	// 3. Create stack and register handlers.
 	s := stack.New(ch)
@@ -99,6 +100,9 @@ func tcpEcho(ln *tcp.TCPListener) {
 			defer conn.Close()
 			buf := make([]byte, 4096)
 			for {
+				if *readDelay > 0 {
+					time.Sleep(*readDelay)
+				}
 				n, err := conn.Read(buf)
 				if n > 0 {
 					conn.Write(buf[:n])
