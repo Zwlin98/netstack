@@ -64,6 +64,9 @@ func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int, peerMSS uint
 	if pmss < mss {
 		mss = pmss
 	}
+	// Initial window per RFC 6928: IW = min(10*MSS, max(2*MSS, 14600)).
+	iw := min(10*uint32(mss), max(2*uint32(mss), 14600))
+
 	return &sender{
 		iss:        iss,
 		nxt:        iss + 1, // SYN consumed one sequence number
@@ -72,7 +75,7 @@ func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int, peerMSS uint
 		mss:        mss,
 		rto:        initialRTO,
 		maxRetries: defaultMaxRetries,
-		cwnd:       uint32(mss),
+		cwnd:       iw,
 		ssthresh:   initialSSThresh,
 	}
 }
@@ -355,6 +358,12 @@ func (s *sender) handleDupACK(conn *TCPConn) {
 		s.sendPending(conn)
 		return
 	}
+	if s.dupACKCount <= 2 {
+		// Limited Transmit (RFC 3042): send one new segment per dup ACK
+		// for the first two dup ACKs, without modifying cwnd.
+		s.limitedTransmit(conn)
+		return
+	}
 	if s.dupACKCount == 3 {
 		// Enter fast recovery (NewReno RFC 5681 / RFC 6582).
 		s.ssthresh = max(s.cwnd/2, 2*uint32(s.mss))
@@ -363,4 +372,30 @@ func (s *sender) handleDupACK(conn *TCPConn) {
 		s.recoveryPoint = s.nxt
 		s.retransmitFirstUnSACKed(conn)
 	}
+}
+
+// limitedTransmit sends one new data segment without modifying cwnd (RFC 3042).
+func (s *sender) limitedTransmit(conn *TCPConn) {
+	available := conn.writeBuf.Len()
+	if available <= 0 {
+		return
+	}
+	// Only send if within the advertised window.
+	flightSize := int(s.nxt - s.una)
+	if flightSize >= int(s.wnd) {
+		return
+	}
+	segSize := min(min(available, s.mss), int(s.wnd)-flightSize)
+	if segSize <= 0 {
+		return
+	}
+	data := make([]byte, segSize)
+	n := conn.writeBuf.ReadNoBlock(data)
+	if n == 0 {
+		return
+	}
+	data = data[:n]
+	conn.sendData(data, s.nxt)
+	s.recordSent(s.nxt, data)
+	s.nxt += uint32(n)
 }

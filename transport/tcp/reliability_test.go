@@ -142,9 +142,9 @@ func TestFastRetransmitOnTripleDupACK(t *testing.T) {
 
 	serverISN, conn := completeHandshake(t, ch, h, clientAddr, serverAddr, clientPort, serverPort, clientISN)
 
-	// Server writes enough data for multiple segments.
-	// cwnd starts at MSS (1460). We need to grow it to send multiple segments.
-	data := make([]byte, 4000)
+	// With IW=10 (cwnd=14600), send enough data to fill the initial window.
+	// 14600 bytes = 10 segments of 1460 bytes.
+	data := make([]byte, 14600)
 	for i := range data {
 		data[i] = byte(i % 256)
 	}
@@ -154,52 +154,71 @@ func TestFastRetransmitOnTripleDupACK(t *testing.T) {
 		conn.Write(data)
 	})
 
-	// Read first segment (cwnd=MSS allows only 1 segment initially).
-	raw1 := ch.Read(time.Second)
-	if raw1 == nil {
-		t.Fatal("expected segment 0")
-	}
-	_, tcpHdr1 := parseTCPResponse(t, raw1)
-	seg1Len := uint32(len(raw1[header.IPv4MinHeaderSize+tcpHdr1.DataOffset():]))
-	seg1End := tcpHdr1.SequenceNumber() + seg1Len
-
-	// ACK the first segment to grow cwnd (slow start: cwnd doubles).
-	ack1 := buildTCPPacket(clientAddr, serverAddr, clientPort, serverPort,
-		header.TCPFlagACK, clientISN+1, seg1End)
-	ch.Inject(ack1)
-
-	// Now cwnd >= 2*MSS. Read the next 2 segments.
+	// Read all segments sent in the initial window burst.
 	type sentSeg struct {
-		seq     uint32
-		payload []byte
+		seq uint32
+		end uint32
 	}
 	var segs []sentSeg
-	for i := 0; i < 2; i++ {
-		raw := ch.Read(time.Second)
+	for {
+		raw := ch.Read(500 * time.Millisecond)
 		if raw == nil {
-			t.Fatalf("expected segment %d after window growth", i+1)
+			break
 		}
 		_, tcpHdr := parseTCPResponse(t, raw)
 		payload := raw[header.IPv4MinHeaderSize+tcpHdr.DataOffset():]
-		segs = append(segs, sentSeg{seq: tcpHdr.SequenceNumber(), payload: append([]byte(nil), payload...)})
+		segs = append(segs, sentSeg{
+			seq: tcpHdr.SequenceNumber(),
+			end: tcpHdr.SequenceNumber() + uint32(len(payload)),
+		})
 	}
 
-	// Now send 3 duplicate ACKs at seg1End (the current UNA), simulating
-	// that the second segment was lost but later segments arrived.
+	if len(segs) < 3 {
+		t.Fatalf("expected at least 3 segments, got %d", len(segs))
+	}
+
+	// ACK the first segment — this is a NEW ACK that advances UNA.
+	seg1End := segs[0].end
+	ackPkt := buildTCPPacket(clientAddr, serverAddr, clientPort, serverPort,
+		header.TCPFlagACK, clientISN+1, seg1End)
+	ch.Inject(ackPkt)
+	time.Sleep(10 * time.Millisecond)
+
+	// Drain any segments sent due to window growth.
+	for {
+		r := ch.Read(50 * time.Millisecond)
+		if r == nil {
+			break
+		}
+	}
+
+	// Now send 3 duplicate ACKs at seg1End (pretend segment 2 was lost).
 	dupACK := buildTCPPacket(clientAddr, serverAddr, clientPort, serverPort,
 		header.TCPFlagACK, clientISN+1, seg1End)
-	for i := 0; i < 3; i++ {
-		ch.Inject(dupACK)
+
+	// Dup ACK #1 and #2 trigger limited transmit.
+	ch.Inject(dupACK)
+	time.Sleep(10 * time.Millisecond)
+	ch.Inject(dupACK)
+	time.Sleep(10 * time.Millisecond)
+	// Drain any limited transmit segments.
+	for {
+		r := ch.Read(50 * time.Millisecond)
+		if r == nil {
+			break
+		}
 	}
 
-	// Should get a fast retransmit of the oldest unacked segment (seg2).
+	// Dup ACK #3 triggers fast retransmit.
+	ch.Inject(dupACK)
+
 	raw := ch.Read(time.Second)
 	if raw == nil {
 		t.Fatal("expected fast retransmit")
 	}
 	_, rtxHdr := parseTCPResponse(t, raw)
 
-	// Fast retransmit should resend the segment starting at seg1End.
+	// Fast retransmit should resend the segment starting at seg1End (segment 2).
 	if rtxHdr.SequenceNumber() != seg1End {
 		t.Errorf("fast retransmit SeqNum = %d, want %d", rtxHdr.SequenceNumber(), seg1End)
 	}

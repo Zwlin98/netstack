@@ -57,7 +57,7 @@ func TestExponentialIncreaseDuringSlowStart(t *testing.T) {
 
 	serverISN, conn := completeHandshake(t, ch, h, clientAddr, serverAddr, clientPort, serverPort, clientISN)
 
-	const initialCwnd = 1
+	const initialCwnd = 10 // RFC 6928 IW=10
 	const iterations = 4
 	data := make([]byte, maxPayload*(initialCwnd<<(iterations+1)))
 	for i := range data {
@@ -128,7 +128,7 @@ func TestCongestionAvoidance(t *testing.T) {
 
 	serverISN, conn := completeHandshake(t, ch, h, clientAddr, serverAddr, clientPort, serverPort, clientISN)
 
-	const initialCwnd = 1
+	const initialCwnd = 10 // RFC 6928 IW=10
 	const iterations = 3
 	data := make([]byte, 2*maxPayload*(initialCwnd<<(iterations+1)))
 	for i := range data {
@@ -245,7 +245,7 @@ func TestRetransmit(t *testing.T) {
 
 	serverISN, conn := completeHandshake(t, ch, h, clientAddr, serverAddr, clientPort, serverPort, clientISN)
 
-	const initialCwnd = 1
+	const initialCwnd = 10 // RFC 6928 IW=10
 	const iterations = 3
 	data := make([]byte, maxPayload*(initialCwnd<<(iterations+1)))
 	for i := range data {
