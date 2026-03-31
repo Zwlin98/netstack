@@ -7,7 +7,7 @@ import "github.com/Zwlin98/netstack/header"
 func (c *TCPConn) handleFinWait1(seg segment) {
 	ackOfFIN := false
 	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
-		c.snd.wnd = seg.wnd
+		c.snd.wnd = uint32(seg.wnd) << c.sndWndScale
 		c.snd.handleACK(seg.ack, c)
 		// Check if our FIN has been ACKed (ACK covers snd.nxt which is past the FIN).
 		if !c.snd.hasUnacked() {
@@ -47,7 +47,7 @@ func (c *TCPConn) handleFinWait1(seg segment) {
 // Our FIN has been ACKed; we still accept data and wait for peer's FIN.
 func (c *TCPConn) handleFinWait2(seg segment) {
 	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
-		c.snd.wnd = seg.wnd
+		c.snd.wnd = uint32(seg.wnd) << c.sndWndScale
 	}
 
 	// Continue accepting data.

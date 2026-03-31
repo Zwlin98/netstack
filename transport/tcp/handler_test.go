@@ -958,5 +958,127 @@ func TestListenCloseWhileConnect(t *testing.T) {
 	}
 }
 
+// buildTCPPacketWithOptions constructs an IPv4+TCP packet with TCP options.
+func buildTCPPacketWithOptions(src, dst tcpip.Address, srcPort, dstPort uint16, flags header.TCPFlags, seqNum, ackNum uint32, opts []byte) []byte {
+	optLen := len(opts)
+	// Pad to 4-byte alignment.
+	for optLen%4 != 0 {
+		opts = append(opts, header.TCPOptionNOP)
+		optLen++
+	}
+	tcpHdrLen := header.TCPMinHeaderSize + optLen
+	totalLen := header.IPv4MinHeaderSize + tcpHdrLen
+	buf := make([]byte, totalLen)
+
+	ip := header.IPv4(buf)
+	ip.Encode(&header.IPv4Fields{
+		TotalLength: uint16(totalLen),
+		TTL:         64,
+		Protocol:    tcpip.TCPProtocolNumber,
+		SrcAddr:     src,
+		DstAddr:     dst,
+	})
+	ip.SetChecksum(0)
+	ip.SetChecksum(header.Checksum(buf[:header.IPv4MinHeaderSize], 0))
+
+	tcpBuf := buf[header.IPv4MinHeaderSize:]
+	tcpHdr := header.TCP(tcpBuf)
+	tcpHdr.Encode(&header.TCPFields{
+		SrcPort:    srcPort,
+		DstPort:    dstPort,
+		SeqNum:     seqNum,
+		AckNum:     ackNum,
+		DataOffset: uint8(tcpHdrLen / 4),
+		Flags:      flags,
+		WindowSize: 65535,
+	})
+	copy(tcpBuf[header.TCPMinHeaderSize:], opts)
+	tcpHdr.SetChecksum(0)
+	partial := header.PseudoHeaderChecksum(tcpip.TCPProtocolNumber, src, dst, uint16(tcpHdrLen))
+	tcpHdr.SetChecksum(header.Checksum(tcpBuf, partial))
+
+	return buf
+}
+
+// TestWindowScaling_SYNACKIncludesOptions verifies that when a SYN includes
+// WS option, the SYN+ACK response includes MSS and WS options.
+func TestWindowScaling_SYNACKIncludesOptions(t *testing.T) {
+	ch, s, h := setupStack(t)
+	defer s.Stop()
+	defer h.Close()
+
+	clientAddr := tcpip.From4(10, 0, 0, 1)
+	serverAddr := tcpip.From4(10, 0, 0, 2)
+
+	// SYN with MSS=1460, WS=7, SACK-Permitted.
+	var synOpts []byte
+	buf := make([]byte, 10)
+	n := 0
+	n += header.EncodeMSSOption(buf[n:], 1460)
+	buf[n] = header.TCPOptionNOP
+	n++
+	n += header.EncodeWSOption(buf[n:], 7)
+	n += header.EncodeSACKPermittedOption(buf[n:])
+	synOpts = buf[:n]
+
+	syn := buildTCPPacketWithOptions(clientAddr, serverAddr, 12345, 80, header.TCPFlagSYN, 1000, 0, synOpts)
+	ch.Inject(syn)
+
+	raw := ch.Read(time.Second)
+	if raw == nil {
+		t.Fatal("expected SYN+ACK, got nil")
+	}
+	_, tcpHdr := parseTCPResponse(t, raw)
+	if !tcpHdr.Flags().Has(header.TCPFlagSYN | header.TCPFlagACK) {
+		t.Fatalf("expected SYN|ACK, got %s", tcpHdr.Flags())
+	}
+
+	// Parse the SYN+ACK options.
+	opts := tcpHdr.Options()
+	if opts == nil {
+		t.Fatal("SYN+ACK has no options")
+	}
+	so := header.ParseSynOptions(opts)
+	if so.MSS == 0 {
+		t.Error("SYN+ACK missing MSS option")
+	}
+	if so.WS < 0 {
+		t.Error("SYN+ACK missing WS option")
+	}
+	if !so.SACKPermit {
+		t.Error("SYN+ACK missing SACK-Permitted option")
+	}
+	t.Logf("SYN+ACK options: MSS=%d, WS=%d, SACK=%v", so.MSS, so.WS, so.SACKPermit)
+}
+
+// TestWindowScaling_PeerNoWS verifies that when a SYN without WS option
+// arrives, the SYN+ACK also does not include WS.
+func TestWindowScaling_PeerNoWS(t *testing.T) {
+	ch, s, h := setupStack(t)
+	defer s.Stop()
+	defer h.Close()
+
+	clientAddr := tcpip.From4(10, 0, 0, 1)
+	serverAddr := tcpip.From4(10, 0, 0, 2)
+
+	// Plain SYN without options.
+	syn := buildTCPPacket(clientAddr, serverAddr, 12345, 80, header.TCPFlagSYN, 1000, 0)
+	ch.Inject(syn)
+
+	raw := ch.Read(time.Second)
+	if raw == nil {
+		t.Fatal("expected SYN+ACK, got nil")
+	}
+	_, tcpHdr := parseTCPResponse(t, raw)
+
+	opts := tcpHdr.Options()
+	if opts != nil {
+		so := header.ParseSynOptions(opts)
+		if so.WS >= 0 {
+			t.Errorf("SYN+ACK should not include WS when peer didn't offer it, got WS=%d", so.WS)
+		}
+	}
+}
+
 // Ensure binary import is used (needed for buildTCPPacket checksum).
 var _ = binary.BigEndian

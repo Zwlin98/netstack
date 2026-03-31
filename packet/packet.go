@@ -5,8 +5,9 @@ import "sync"
 
 const (
 	// MaxHeadroom is the maximum headroom reserved for headers.
-	// Enough for the maximum IPv4 header (60 bytes).
-	MaxHeadroom = 60
+	// 20 (IPv4) + 20 (TCP base) + 28 (TCP options: 3 SACK blocks padded) = 68.
+	// Rounded up to 80 for margin.
+	MaxHeadroom = 80
 
 	// MaxPacketSize is the maximum total buffer size.
 	MaxPacketSize = 1560

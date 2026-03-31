@@ -22,6 +22,7 @@ type unackedSegment struct {
 	fin           bool // true if this is a FIN segment
 	sentAt        time.Time
 	retransmitted bool
+	sacked        bool // marked as SACKed by peer
 }
 
 // sender tracks the send side of a TCP connection.
@@ -29,7 +30,7 @@ type sender struct {
 	iss uint32 // initial send sequence number
 	nxt uint32 // next sequence to send (SND.NXT)
 	una uint32 // oldest unacknowledged (SND.UNA)
-	wnd uint16 // peer's advertised receive window (SND.WND)
+	wnd uint32 // peer's advertised receive window, scaled (SND.WND)
 	mss int    // maximum segment size, derived from MTU
 
 	// Retransmission state.
@@ -44,9 +45,13 @@ type sender struct {
 	cwnd        uint32
 	ssthresh    uint32
 	dupACKCount int
+
+	// NewReno fast recovery (RFC 5681 / RFC 6582).
+	inRecovery    bool   // currently in fast recovery
+	recoveryPoint uint32 // SND.NXT at recovery entry; full ACK past this exits recovery
 }
 
-func newSender(iss uint32, peerWnd uint16, mtu int) *sender {
+func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int) *sender {
 	mss := mtu - header.IPv4MinHeaderSize - header.TCPMinHeaderSize
 	if mss <= 0 {
 		mss = 536 // RFC 879 default
@@ -55,7 +60,7 @@ func newSender(iss uint32, peerWnd uint16, mtu int) *sender {
 		iss:        iss,
 		nxt:        iss + 1, // SYN consumed one sequence number
 		una:        iss + 1,
-		wnd:        peerWnd,
+		wnd:        uint32(peerWnd) << wndScale,
 		mss:        mss,
 		rto:        initialRTO,
 		maxRetries: defaultMaxRetries,
@@ -193,6 +198,10 @@ func (s *sender) handleRTO(conn *TCPConn) {
 		return
 	}
 
+	// Exit fast recovery if active.
+	s.inRecovery = false
+	s.dupACKCount = 0
+
 	// Congestion response: multiplicative decrease.
 	s.ssthresh = max(s.cwnd/2, 2*uint32(s.mss))
 	s.cwnd = uint32(s.mss)
@@ -201,7 +210,69 @@ func (s *sender) handleRTO(conn *TCPConn) {
 	s.rto *= 2
 	s.rto = min(s.rto, maxRTO)
 
+	// Clear SACK marks — on RTO we don't trust previous SACK info.
+	for i := range s.unacked {
+		s.unacked[i].sacked = false
+	}
+
 	s.retransmitOldest(conn)
+}
+
+// processSACKBlocks marks unacked segments covered by SACK blocks.
+func (s *sender) processSACKBlocks(blocks []header.SACKBlock) {
+	for i := range s.unacked {
+		seg := &s.unacked[i]
+		if seg.sacked {
+			continue
+		}
+		segEnd := seg.seq + uint32(len(seg.data))
+		for _, b := range blocks {
+			if seg.seq >= b.Start && segEnd <= b.End {
+				seg.sacked = true
+				break
+			}
+		}
+	}
+}
+
+// retransmitFirstUnSACKed retransmits the first un-SACKed unacked segment.
+func (s *sender) retransmitFirstUnSACKed(conn *TCPConn) {
+	for i := range s.unacked {
+		seg := &s.unacked[i]
+		if !seg.sacked {
+			seg.retransmitted = true
+			seg.sentAt = time.Now()
+			if seg.fin {
+				conn.sendFINSegment(seg.seq)
+			} else {
+				conn.sendData(seg.data, seg.seq)
+			}
+			return
+		}
+	}
+}
+
+// sackLossDetection checks if a segment is lost based on SACK info.
+// A segment is lost if 3+ higher-sequence segments are SACKed.
+func (s *sender) sackLossDetection(conn *TCPConn) {
+	for i := range s.unacked {
+		seg := &s.unacked[i]
+		if seg.sacked || seg.retransmitted {
+			continue
+		}
+		// Count SACKed segments above this one.
+		sackedAbove := 0
+		for j := i + 1; j < len(s.unacked); j++ {
+			if s.unacked[j].sacked {
+				sackedAbove++
+			}
+		}
+		if sackedAbove >= 3 {
+			seg.retransmitted = true
+			seg.sentAt = time.Now()
+			conn.sendData(seg.data, seg.seq)
+		}
+	}
 }
 
 // handleACK processes an incoming ACK, updating congestion control state.
@@ -217,44 +288,61 @@ func (s *sender) handleACK(ack uint32, conn *TCPConn) {
 	}
 
 	// New ACK.
-	acked := uint32(0)
-	if seqGreaterThan(ack, s.una) {
-		acked = ack - s.una
-	}
+	acked := ack - s.una
 	s.una = ack
-	s.dupACKCount = 0
 	s.retries = 0
 
 	s.removeAcked(ack)
 
-	// Congestion window update.
-	if s.cwnd < s.ssthresh {
-		// Slow start: increase cwnd by acked bytes, capped at ssthresh.
-		s.cwnd += acked
-		if s.cwnd > s.ssthresh {
+	if s.inRecovery {
+		if seqLessThan(ack, s.recoveryPoint) {
+			// Partial ACK: retransmit next unacked, deflate cwnd, stay in recovery.
+			s.retransmitFirstUnSACKed(conn)
 			s.cwnd = s.ssthresh
+			s.dupACKCount = 0
+		} else {
+			// Full ACK: exit recovery.
+			s.inRecovery = false
+			s.cwnd = s.ssthresh
+			s.dupACKCount = 0
 		}
 	} else {
-		// Congestion avoidance: increase cwnd by ~1 MSS per RTT.
-		// Scale by acked bytes so cumulative ACKs produce the same growth
-		// as individual per-segment ACKs.
-		increment := uint32(s.mss) * acked / s.cwnd
-		if increment == 0 {
-			increment = 1
+		s.dupACKCount = 0
+		// Congestion window update.
+		if s.cwnd < s.ssthresh {
+			// Slow start: increase cwnd by acked bytes, capped at ssthresh.
+			s.cwnd += acked
+			if s.cwnd > s.ssthresh {
+				s.cwnd = s.ssthresh
+			}
+		} else {
+			// Congestion avoidance: increase cwnd by ~1 MSS per RTT.
+			increment := uint32(s.mss) * acked / s.cwnd
+			if increment == 0 {
+				increment = 1
+			}
+			s.cwnd += increment
 		}
-		s.cwnd += increment
 	}
 
 	s.sendPending(conn)
 }
 
-// handleDupACK processes a duplicate ACK for fast retransmit.
+// handleDupACK processes a duplicate ACK for fast retransmit / NewReno.
 func (s *sender) handleDupACK(conn *TCPConn) {
 	s.dupACKCount++
+	if s.inRecovery {
+		// During recovery: inflate cwnd by MSS per dup ACK.
+		s.cwnd += uint32(s.mss)
+		s.sendPending(conn)
+		return
+	}
 	if s.dupACKCount == 3 {
-		// Fast retransmit.
+		// Enter fast recovery (NewReno RFC 5681 / RFC 6582).
 		s.ssthresh = max(s.cwnd/2, 2*uint32(s.mss))
 		s.cwnd = s.ssthresh + 3*uint32(s.mss)
-		s.retransmitOldest(conn)
+		s.inRecovery = true
+		s.recoveryPoint = s.nxt
+		s.retransmitFirstUnSACKed(conn)
 	}
 }

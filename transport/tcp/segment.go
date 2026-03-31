@@ -12,6 +12,7 @@ type segment struct {
 	seq     uint32
 	ack     uint32
 	wnd     uint16
+	options []byte // raw TCP options bytes
 	payload []byte
 }
 
@@ -27,6 +28,7 @@ func parseSeg(pb *packet.PacketBuffer) segment {
 		seq:     tcpHdr.SequenceNumber(),
 		ack:     tcpHdr.AckNumber(),
 		wnd:     tcpHdr.WindowSize(),
+		options: tcpHdr.Options(),
 		payload: payload,
 	}
 }
@@ -38,19 +40,40 @@ func setTCPChecksum(hdr header.TCP, src, dst tcpip.Address, tcpLen uint16) {
 }
 
 func (c *TCPConn) sendSYNACK() {
+	// Build options: MSS + NOP + WS + SACK-Permitted (if negotiated).
+	var optBuf [12]byte
+	optLen := 0
+	mss := uint16(c.handler.stack.MTU() - header.IPv4MinHeaderSize - header.TCPMinHeaderSize)
+	optLen += header.EncodeMSSOption(optBuf[optLen:], mss)
+	if c.rcvWndScale > 0 {
+		optBuf[optLen] = header.TCPOptionNOP
+		optLen++
+		optLen += header.EncodeWSOption(optBuf[optLen:], int(c.rcvWndScale))
+	}
+	if c.sackPermitted {
+		optLen += header.EncodeSACKPermittedOption(optBuf[optLen:])
+	}
+	// Pad to 4-byte alignment.
+	for optLen%4 != 0 {
+		optBuf[optLen] = header.TCPOptionNOP
+		optLen++
+	}
+
+	hdrSize := header.TCPMinHeaderSize + optLen
 	pb := packet.NewPacketBuffer(packet.MaxHeadroom)
-	tcpBuf := pb.Prepend(header.TCPMinHeaderSize)
+	tcpBuf := pb.Prepend(hdrSize)
 	hdr := header.TCP(tcpBuf)
 	hdr.Encode(&header.TCPFields{
 		SrcPort:    c.flow.DstPort,
 		DstPort:    c.flow.SrcPort,
 		SeqNum:     c.iss,
 		AckNum:     c.irs + 1,
-		DataOffset: header.TCPMinHeaderSize / 4,
+		DataOffset: uint8(hdrSize / 4),
 		Flags:      header.TCPFlagSYN | header.TCPFlagACK,
 		WindowSize: 65535,
 	})
-	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, header.TCPMinHeaderSize)
+	copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
+	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 }
 
@@ -67,19 +90,36 @@ func (c *TCPConn) sendACK() {
 		wnd = c.rcv.wnd()
 	}
 
+	// Build SACK option if applicable.
+	var optBuf [34]byte // max: 2 header + 3*8 blocks = 26, padded to 28
+	optLen := 0
+	if c.sackPermitted && c.rcv != nil {
+		if blocks := c.rcv.sackBlocks(); len(blocks) > 0 {
+			optLen = header.EncodeSACKBlocks(optBuf[:], blocks)
+			for optLen%4 != 0 {
+				optBuf[optLen] = header.TCPOptionNOP
+				optLen++
+			}
+		}
+	}
+
+	hdrSize := header.TCPMinHeaderSize + optLen
 	pb := packet.NewPacketBuffer(packet.MaxHeadroom)
-	tcpBuf := pb.Prepend(header.TCPMinHeaderSize)
+	tcpBuf := pb.Prepend(hdrSize)
 	hdr := header.TCP(tcpBuf)
 	hdr.Encode(&header.TCPFields{
 		SrcPort:    c.flow.DstPort,
 		DstPort:    c.flow.SrcPort,
 		SeqNum:     seqNum,
 		AckNum:     ackNum,
-		DataOffset: header.TCPMinHeaderSize / 4,
+		DataOffset: uint8(hdrSize / 4),
 		Flags:      header.TCPFlagACK,
 		WindowSize: wnd,
 	})
-	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, header.TCPMinHeaderSize)
+	if optLen > 0 {
+		copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
+	}
+	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 }
 

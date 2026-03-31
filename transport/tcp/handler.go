@@ -88,6 +88,9 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 	irs := tcpHdr.SequenceNumber()
 	iss := generateISN()
 
+	// Parse SYN options.
+	synOpts := header.ParseSynOptions(tcpHdr.Options())
+
 	readBuf := newRingBuffer(defaultBufSize)
 	writeBuf := newRingBuffer(defaultBufSize)
 
@@ -104,6 +107,15 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 		done:        make(chan struct{}),
 		closeCh:     make(chan struct{}, 1),
 	}
+
+	// Window scaling: only enable if peer offered it.
+	if synOpts.WS >= 0 {
+		conn.sndWndScale = uint8(synOpts.WS)
+		conn.rcvWndScale = calculateWindowScale(defaultBufSize)
+	}
+
+	// SACK: only enable if peer offered it.
+	conn.sackPermitted = synOpts.SACKPermit
 
 	h.mu.Lock()
 	h.conns[flow] = conn

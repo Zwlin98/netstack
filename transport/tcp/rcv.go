@@ -1,5 +1,7 @@
 package tcp
 
+import "github.com/Zwlin98/netstack/header"
+
 // receiver tracks the receive side of a TCP connection.
 type receiver struct {
 	irs uint32 // initial receive sequence number
@@ -26,13 +28,15 @@ func newReceiver(irs uint32, readBuf *ringBuffer, conn *TCPConn) *receiver {
 	}
 }
 
-// wnd returns the current receive window based on readBuf free space.
+// wnd returns the current receive window for the wire (scaled down by rcvWndScale).
 func (r *receiver) wnd() uint16 {
 	free := r.readBuf.Free()
-	if free > 0xFFFF {
+	scale := r.conn.rcvWndScale
+	scaled := free >> scale
+	if scaled > 0xFFFF {
 		return 0xFFFF
 	}
-	return uint16(free)
+	return uint16(scaled)
 }
 
 // handleData processes incoming data at the given sequence number.
@@ -79,6 +83,28 @@ func (r *receiver) insertOOO(seq uint32, data []byte) {
 	r.ooo = append(r.ooo, oooSegment{})
 	copy(r.ooo[i+1:], r.ooo[i:])
 	r.ooo[i] = seg
+}
+
+// sackBlocks returns the current SACK blocks from the OOO buffer.
+// Returns up to 3 blocks, most-recent-first.
+func (r *receiver) sackBlocks() []header.SACKBlock {
+	n := len(r.ooo)
+	if n == 0 {
+		return nil
+	}
+	if n > 3 {
+		n = 3
+	}
+	blocks := make([]header.SACKBlock, n)
+	// Most-recent-first (OOO is sorted by seq, so last entry is most recent).
+	for i := range n {
+		seg := r.ooo[len(r.ooo)-1-i]
+		blocks[i] = header.SACKBlock{
+			Start: seg.seq,
+			End:   seg.seq + uint32(len(seg.data)),
+		}
+	}
+	return blocks
 }
 
 func (r *receiver) deliverOOO() {

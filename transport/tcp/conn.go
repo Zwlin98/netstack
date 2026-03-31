@@ -24,6 +24,13 @@ type TCPConn struct {
 	iss uint32 // our initial sequence number
 	irs uint32 // peer's initial sequence number
 
+	// Window scaling (RFC 7323).
+	sndWndScale uint8 // peer's window scale shift count
+	rcvWndScale uint8 // our window scale shift count
+
+	// SACK (RFC 2018).
+	sackPermitted bool // both sides support SACK
+
 	// Sender / Receiver (initialized on transition to ESTABLISHED).
 	snd *sender
 	rcv *receiver
@@ -245,7 +252,7 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 	case stateCloseWait:
 		// In CLOSE_WAIT, we still process ACKs for our data.
 		if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
-			c.snd.wnd = seg.wnd
+			c.snd.wnd = uint32(seg.wnd) << c.sndWndScale
 			c.snd.handleACK(seg.ack, c)
 		}
 	case stateLastAck:
@@ -265,6 +272,22 @@ func (c *TCPConn) cleanup() {
 			return
 		}
 	}
+}
+
+// calculateWindowScale returns the window scale shift count for a given buffer size.
+// The scale factor is the number of bits needed to represent the buffer beyond 16 bits.
+func calculateWindowScale(bufSize int) uint8 {
+	if bufSize <= 0xFFFF {
+		return 0
+	}
+	scale := uint8(0)
+	for (bufSize >> (16 + scale)) > 0 {
+		scale++
+	}
+	if scale > header.MaxWndScale {
+		scale = header.MaxWndScale
+	}
+	return scale
 }
 
 func generateISN() uint32 {

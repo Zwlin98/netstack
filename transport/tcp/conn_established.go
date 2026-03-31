@@ -8,10 +8,20 @@ func (c *TCPConn) handleEstablished(seg segment) {
 	// ACK processing: update peer window, congestion control.
 	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
 		oldWnd := c.snd.wnd
-		c.snd.wnd = seg.wnd
+		c.snd.wnd = uint32(seg.wnd) << c.sndWndScale
+
+		// Process SACK blocks if negotiated.
+		if c.sackPermitted && len(seg.options) > 0 {
+			so := header.ParseSegmentOptions(seg.options)
+			if len(so.SACKBlocks) > 0 {
+				c.snd.processSACKBlocks(so.SACKBlocks)
+				c.snd.sackLossDetection(c)
+			}
+		}
+
 		c.snd.handleACK(seg.ack, c)
 		// A pure window update (same ACK, larger window) should trigger sending.
-		if seg.ack == c.snd.una && seg.wnd > oldWnd {
+		if seg.ack == c.snd.una && uint32(seg.wnd)<<c.sndWndScale > oldWnd {
 			c.snd.sendPending(c)
 		}
 	}
