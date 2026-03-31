@@ -19,6 +19,13 @@ const (
 	maxZeroWindowProbeInterval = 60 * time.Second
 )
 
+// FIN_WAIT_2 timeout (RFC 1122 §4.2.2.13). Exported var for test override.
+var FinWait2Timeout = 60 * time.Second
+
+// SYN_RCVD timeout: half-open connections are cleaned up after this duration.
+// Exported var for test override.
+var SynRcvdTimeout = 75 * time.Second
+
 // TCP Keepalive defaults (RFC 1122 Section 4.2.3.6).
 // Exported vars to allow test override.
 var (
@@ -84,6 +91,10 @@ type TCPConn struct {
 	// Notify conn.run() that writeBuf has data.
 	writeNotify chan struct{}
 
+	// Notify conn.run() that readBuf was drained and a window update should be sent.
+	windowNotify chan struct{}
+	lastWndZero  bool // last advertised window was 0
+
 	inbound chan *packet.PacketBuffer
 
 	done          chan struct{}
@@ -96,6 +107,12 @@ type TCPConn struct {
 
 	// TIME_WAIT timer, managed within run loop.
 	timeWaitTimer *time.Timer
+
+	// FIN_WAIT_2 timer (RFC 1122): close if peer doesn't send FIN.
+	finWait2Timer *time.Timer
+
+	// SYN_RCVD timer: close half-open connections that never complete handshake.
+	synRcvdTimer *time.Timer
 }
 
 // SetNoDelay enables or disables the Nagle algorithm.
@@ -127,7 +144,16 @@ func (c *TCPConn) Read(b []byte) (int, error) {
 	if c.readBuf == nil {
 		return 0, io.EOF
 	}
-	return c.readBuf.Read(b, c.done)
+	n, err := c.readBuf.Read(b, c.done)
+	if n > 0 {
+		// If reading freed enough buffer space to open the receive window,
+		// notify conn.run() to send a window update ACK.
+		select {
+		case c.windowNotify <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
 }
 
 // Write writes data to the connection. Blocks until all data is written.
@@ -335,11 +361,27 @@ func (c *TCPConn) run() {
 	}
 	defer c.zeroWindowTimer.Stop()
 
+	c.finWait2Timer = time.NewTimer(0)
+	if !c.finWait2Timer.Stop() {
+		<-c.finWait2Timer.C
+	}
+	defer c.finWait2Timer.Stop()
+
 	c.keepaliveTimer = time.NewTimer(0)
 	if !c.keepaliveTimer.Stop() {
 		<-c.keepaliveTimer.C
 	}
 	defer c.keepaliveTimer.Stop()
+
+	// SYN_RCVD timer: start if connection is in SYN_RCVD state.
+	c.synRcvdTimer = time.NewTimer(0)
+	if !c.synRcvdTimer.Stop() {
+		<-c.synRcvdTimer.C
+	}
+	defer c.synRcvdTimer.Stop()
+	if c.state == stateSynRcvd {
+		c.synRcvdTimer.Reset(SynRcvdTimeout)
+	}
 
 	for {
 		select {
@@ -426,10 +468,33 @@ func (c *TCPConn) run() {
 				}
 			}
 
+		case <-c.windowNotify:
+			// Application drained readBuf — send window update only if
+			// the last advertised window was 0 and now it's open.
+			if c.lastWndZero && c.rcv != nil && c.rcv.wnd() > 0 {
+				c.lastWndZero = false
+				c.sendACK()
+				c.unackedSegs = 0
+			}
+
 		case <-c.closeCh:
 			c.handleClose()
 			if c.snd != nil && c.snd.hasUnacked() {
 				rtoTimer.Reset(c.snd.rto)
+			}
+
+		case <-c.synRcvdTimer.C:
+			// SYN_RCVD timeout — client never completed handshake.
+			if c.state == stateSynRcvd {
+				c.closeDone()
+				return
+			}
+
+		case <-c.finWait2Timer.C:
+			// FIN_WAIT_2 timeout — peer never sent FIN. Close connection.
+			if c.state == stateFinWait2 {
+				c.closeDone()
+				return
 			}
 
 		case <-c.timeWaitTimer.C:
@@ -492,13 +557,30 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 		}
 	}
 
-	// Common: RST handling applies to all states except TIME_WAIT.
-	// RFC 1337: Ignore RST in TIME_WAIT to prevent TIME-WAIT assassination.
+	// RST validation (RFC 5961 + RFC 1337).
 	if seg.flags.Has(header.TCPFlagRST) {
 		if c.state == stateTimeWait {
+			// RFC 1337: Ignore RST in TIME_WAIT.
 			return
 		}
-		c.handleRST()
+		// Determine rcv.nxt and window for validation.
+		var rcvNxt, rcvWnd uint32
+		if c.rcv != nil {
+			rcvNxt = c.rcv.nxt
+			rcvWnd = c.rcv.rcvWnd()
+		} else {
+			// SYN_RCVD: rcv not yet initialized.
+			rcvNxt = c.irs + 1
+			rcvWnd = uint32(rcvWndSize)
+		}
+		if seg.seq == rcvNxt {
+			// Exact match — accept RST.
+			c.handleRST()
+		} else if seqWithinWindow(seg.seq, rcvNxt, rcvWnd) {
+			// In window but not exact — send challenge ACK (RFC 5961 §3.2).
+			c.sendACK()
+		}
+		// Outside window — silently discard.
 		return
 	}
 
@@ -532,6 +614,8 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 			c.measureRTTM(seg)
 			c.snd.handleACK(seg.ack, c)
 		}
+	case stateClosing:
+		c.handleClosing(seg)
 	case stateLastAck:
 		c.handleLastAck(seg)
 	case stateTimeWait:

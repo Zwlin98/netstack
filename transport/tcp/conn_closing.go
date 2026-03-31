@@ -38,12 +38,15 @@ func (c *TCPConn) handleFinWait1(seg segment) {
 	if seg.flags.Has(header.TCPFlagFIN) && c.rcv != nil {
 		c.rcv.nxt++
 		c.sendACK() // single ACK covers data + FIN
-		c.readBuf.CloseWrite()
+		if !c.readShutdown {
+			c.readBuf.CloseWrite()
+		}
 		if ackOfFIN {
+			// Both FINs exchanged and ours is ACKed → TIME_WAIT.
 			c.enterTimeWait()
 		} else {
-			// Got peer's FIN but our FIN not yet ACKed.
-			c.enterTimeWait()
+			// Simultaneous close: got peer's FIN but our FIN not yet ACKed → CLOSING.
+			c.state = stateClosing
 		}
 		return
 	}
@@ -55,6 +58,7 @@ func (c *TCPConn) handleFinWait1(seg segment) {
 
 	if ackOfFIN {
 		c.state = stateFinWait2
+		c.finWait2Timer.Reset(FinWait2Timeout)
 	}
 }
 
@@ -68,6 +72,8 @@ func (c *TCPConn) handleFinWait2(seg segment) {
 	// Continue accepting data.
 	if len(seg.payload) > 0 && c.rcv != nil {
 		c.rcv.handleData(seg.seq, seg.payload)
+		// Reset FIN_WAIT_2 timer — peer is still active.
+		c.finWait2Timer.Reset(FinWait2Timeout)
 	}
 
 	if seg.flags.Has(header.TCPFlagFIN) && c.rcv != nil {
@@ -79,6 +85,24 @@ func (c *TCPConn) handleFinWait2(seg segment) {
 
 	// ACK for data only.
 	if len(seg.payload) > 0 {
+		c.sendACK()
+	}
+}
+
+// handleClosing processes segments in CLOSING state.
+// Both sides have sent FIN; we are waiting for ACK of our FIN.
+func (c *TCPConn) handleClosing(seg segment) {
+	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
+		c.measureRTTM(seg)
+		c.snd.handleACK(seg.ack, c)
+		// Check if our FIN has been ACKed.
+		if !c.snd.hasUnacked() {
+			c.enterTimeWait()
+			return
+		}
+	}
+	// Re-ACK retransmitted FINs.
+	if seg.flags.Has(header.TCPFlagFIN) {
 		c.sendACK()
 	}
 }

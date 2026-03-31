@@ -11,6 +11,7 @@ const (
 	stateCloseWait
 	stateLastAck
 	stateTimeWait
+	stateClosing
 )
 
 func (s tcpState) String() string {
@@ -31,6 +32,8 @@ func (s tcpState) String() string {
 		return "LAST_ACK"
 	case stateTimeWait:
 		return "TIME_WAIT"
+	case stateClosing:
+		return "CLOSING"
 	default:
 		return "UNKNOWN"
 	}

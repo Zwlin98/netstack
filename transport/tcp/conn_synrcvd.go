@@ -23,6 +23,12 @@ func (c *TCPConn) handleSynRcvd(seg segment) {
 			return
 		}
 		c.state = stateEstablished
+
+		// Cancel SYN_RCVD timeout — handshake completed.
+		if c.synRcvdTimer != nil {
+			c.synRcvdTimer.Stop()
+		}
+
 		c.snd = newSender(c.iss, seg.wnd, c.sndWndScale, c.handler.stack.MTU(), c.peerMSS)
 		if c.tsEnabled {
 			c.snd.mss -= 12 // timestamp option overhead
@@ -39,6 +45,13 @@ func (c *TCPConn) handleSynRcvd(seg segment) {
 		}
 
 		c.resetKeepalive()
+
+		// Deliver data piggybacked on the completing ACK (RFC 793 allows this).
+		if len(seg.payload) > 0 && c.rcv != nil {
+			c.rcv.handleData(seg.seq, seg.payload)
+			c.sendACK()
+		}
+
 		select {
 		case c.handler.listener.acceptCh <- c:
 		case <-c.done:
