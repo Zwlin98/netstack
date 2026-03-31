@@ -45,16 +45,18 @@ func (c *TCPConn) handleEstablished(seg segment) {
 		c.rcv.handleData(seg.seq, seg.payload)
 	}
 
-	// FIN handling: peer is closing their send side. Immediate ACK.
+	// FIN handling: peer is closing their send side.
+	// Only process FIN when all preceding data has been delivered (no gaps).
 	if seg.flags.Has(header.TCPFlagFIN) && c.rcv != nil {
-		c.rcv.nxt++ // FIN occupies one sequence number
-		c.cancelDelayedACK()
-		c.sendACK() // single ACK covers data + FIN
-		if !c.readShutdown {
-			c.readBuf.CloseWrite()
+		finSeq := seg.seq + uint32(len(seg.payload))
+		if c.rcv.nxt == finSeq {
+			// All data before FIN received — process immediately.
+			c.processFIN()
+			return
 		}
-		c.state = stateCloseWait
-		return
+		// Gap exists — defer FIN until OOO segments fill the gap.
+		c.rcv.finReceived = true
+		c.rcv.finSeq = finSeq
 	}
 
 	// Delayed ACK for data segments.

@@ -12,6 +12,10 @@ type receiver struct {
 
 	readBuf *ringBuffer
 	conn    *TCPConn
+
+	// Deferred FIN: set when FIN arrives before all preceding data.
+	finReceived bool
+	finSeq      uint32 // sequence number where FIN sits (after all data)
 }
 
 type oooSegment struct {
@@ -253,6 +257,12 @@ func (r *receiver) deliverOOO() {
 			break
 		}
 		r.ooo = r.ooo[1:]
+	}
+
+	// Check deferred FIN: all preceding data now delivered?
+	if r.finReceived && r.nxt == r.finSeq {
+		r.finReceived = false
+		r.conn.processFIN()
 	}
 }
 

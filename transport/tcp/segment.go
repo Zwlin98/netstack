@@ -150,6 +150,7 @@ func (c *TCPConn) sendData(data []byte, seq uint32) {
 	pb.AppendData(data)
 	tcpBuf := pb.Prepend(hdrSize)
 	hdr := header.TCP(tcpBuf)
+	wnd := c.rcv.wnd()
 	hdr.Encode(&header.TCPFields{
 		SrcPort:    c.flow.DstPort,
 		DstPort:    c.flow.SrcPort,
@@ -157,7 +158,7 @@ func (c *TCPConn) sendData(data []byte, seq uint32) {
 		AckNum:     c.rcv.nxt,
 		DataOffset: uint8(hdrSize / 4),
 		Flags:      header.TCPFlagACK,
-		WindowSize: c.rcv.wnd(),
+		WindowSize: wnd,
 	})
 	if optLen > 0 {
 		copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
@@ -165,6 +166,7 @@ func (c *TCPConn) sendData(data []byte, seq uint32) {
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, tcpLen)
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 	c.updateTSLastAckSent()
+	c.lastWndZero = (wnd == 0)
 }
 
 // sendFINSegment sends a FIN+ACK segment with the given sequence number.

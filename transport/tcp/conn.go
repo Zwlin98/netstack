@@ -79,6 +79,7 @@ type TCPConn struct {
 	// Half-close (shutdown).
 	writeShutdown bool // CloseWrite called — no more writes, FIN sent
 	readShutdown  bool // CloseRead called — discard incoming data
+	finPending    bool // FIN queued but writeBuf not yet drained
 
 	// Sender / Receiver (initialized on transition to ESTABLISHED).
 	snd *sender
@@ -401,6 +402,13 @@ func (c *TCPConn) run() {
 					}
 				}
 			}
+			// Deferred FIN: ACK may have opened send window, try to drain.
+			if c.finPending && c.snd != nil {
+				c.snd.sendPending(c)
+				if c.writeBuf.Len() == 0 {
+					c.finalizeFIN()
+				}
+			}
 
 		case <-rtoTimer.C:
 			if c.snd != nil {
@@ -466,6 +474,10 @@ func (c *TCPConn) run() {
 				if c.snd.hasUnacked() {
 					rtoTimer.Reset(c.snd.rto)
 				}
+				// Deferred FIN: send FIN once writeBuf is fully drained.
+				if c.finPending && c.writeBuf.Len() == 0 {
+					c.finalizeFIN()
+				}
 			}
 
 		case <-c.windowNotify:
@@ -508,7 +520,36 @@ func (c *TCPConn) run() {
 }
 
 // handleClose processes a graceful close request from the application.
+// processFIN handles a FIN whose preceding data has all been delivered.
+func (c *TCPConn) processFIN() {
+	c.rcv.nxt++ // FIN occupies one sequence number
+	c.cancelDelayedACK()
+	c.sendACK()
+	if !c.readShutdown {
+		c.readBuf.CloseWrite()
+	}
+	c.state = stateCloseWait
+}
+
 func (c *TCPConn) handleClose() {
+	switch c.state {
+	case stateEstablished, stateCloseWait:
+		// Flush pending data before sending FIN.
+		if c.snd != nil {
+			c.snd.sendPending(c)
+		}
+		if c.snd != nil && c.writeBuf.Len() > 0 {
+			// Data still queued (window limited) — defer FIN.
+			c.finPending = true
+			return
+		}
+		c.finalizeFIN()
+	}
+}
+
+// finalizeFIN sends FIN and transitions to the appropriate state.
+func (c *TCPConn) finalizeFIN() {
+	c.finPending = false
 	switch c.state {
 	case stateEstablished:
 		c.sendFIN()
