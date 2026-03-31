@@ -1,21 +1,25 @@
-// Example: echo server over TUN device.
+// Example: echo / forward server over TUN device.
 //
 // Requires root. Tests ICMP, TCP, and UDP through the netstack.
 //
-// Setup (automatic):
+// Usage:
 //
-//	Creates tun0 with IP 10.0.0.1/24
+//	./echo                                   # echo mode (default)
+//	./echo -forward <ssh-host>:5201             # forward all TCP to remote host
 //
 // Test from another terminal:
 //
-//	ping 10.0.0.1                          # ICMP echo (stack built-in)
-//	echo hello | nc 10.0.0.1 7777          # TCP echo
-//	echo hello | nc -u -w1 10.0.0.1 7777   # UDP echo
+//	ping 10.0.0.1                            # ICMP echo (stack built-in)
+//	echo hello | nc 10.0.0.1 7777            # TCP echo
+//	echo hello | nc -u -w1 10.0.0.1 7777     # UDP echo
+//	iperf3 -c 10.0.0.1                       # TCP forward (with -forward)
 package main
 
 import (
+	"flag"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -29,12 +33,15 @@ import (
 )
 
 const (
-	tunName = "tun0"
-	tunMTU  = 1500
+	tunName   = "tun0"
+	tunMTU    = 1500
 	tunSubnet = "10.0.0.0/24"
 )
 
+var forwardAddr = flag.String("forward", "", "forward all TCP to this address (e.g. host:5201)")
+
 func main() {
+	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
 	// 1. Create TUN device.
@@ -64,10 +71,14 @@ func main() {
 	s.Start()
 	defer s.Stop()
 
-	log.Println("stack started, echo on all ports")
-
-	// 4. Start echo servers.
-	go tcpEcho(tcpHandler.Listener())
+	// 4. Start handlers.
+	if *forwardAddr != "" {
+		log.Printf("stack started, forwarding TCP to %s", *forwardAddr)
+		go tcpForward(tcpHandler.Listener(), *forwardAddr)
+	} else {
+		log.Println("stack started, echo on all ports")
+		go tcpEcho(tcpHandler.Listener())
+	}
 	go udpEcho(udpHandler)
 
 	// 5. Wait for signal.
@@ -83,7 +94,7 @@ func tcpEcho(ln *tcp.TCPListener) {
 		if err != nil {
 			return
 		}
-		log.Printf("[tcp] connection from %s", conn.RemoteAddr())
+		log.Printf("[tcp] echo from %s", conn.RemoteAddr())
 		go func() {
 			defer conn.Close()
 			buf := make([]byte, 4096)
@@ -99,6 +110,34 @@ func tcpEcho(ln *tcp.TCPListener) {
 					return
 				}
 			}
+		}()
+	}
+}
+
+func tcpForward(ln *tcp.TCPListener, addr string) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		log.Printf("[tcp] forward %s → %s", conn.RemoteAddr(), addr)
+		go func() {
+			defer conn.Close()
+			remote, err := net.Dial("tcp", addr)
+			if err != nil {
+				log.Printf("[tcp] dial %s: %v", addr, err)
+				return
+			}
+			defer remote.Close()
+			done := make(chan struct{})
+			go func() {
+				io.Copy(remote, conn)
+				remote.(*net.TCPConn).CloseWrite()
+				close(done)
+			}()
+			io.Copy(conn, remote)
+			conn.CloseWrite()
+			<-done
 		}()
 	}
 }
