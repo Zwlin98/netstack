@@ -86,17 +86,17 @@ func parseTCPResponse(t *testing.T, raw []byte) (header.IPv4, header.TCP) {
 }
 
 // setupStack creates a MemoryChannel, Stack, and TCPHandler wired together.
-func setupStack(t *testing.T) (*channel.MemoryChannel, *stack.Stack, *tcp.TCPHandler) {
+func setupStack(t *testing.T, opts ...tcp.Option) (*channel.MemoryChannel, *stack.Stack, *tcp.TCPHandler) {
 	t.Helper()
-	return setupStackWithMTU(t, 1500)
+	return setupStackWithMTU(t, 1500, opts...)
 }
 
 // setupStackWithMTU creates a MemoryChannel with a custom MTU.
-func setupStackWithMTU(t *testing.T, mtu int) (*channel.MemoryChannel, *stack.Stack, *tcp.TCPHandler) {
+func setupStackWithMTU(t *testing.T, mtu int, opts ...tcp.Option) (*channel.MemoryChannel, *stack.Stack, *tcp.TCPHandler) {
 	t.Helper()
 	ch := channel.NewMemory(mtu)
 	s := stack.New(ch)
-	h := tcp.NewTCPHandler(s)
+	h := tcp.NewTCPHandler(s, opts...)
 	s.RegisterHandler(tcpip.TCPProtocolNumber, h)
 	s.Start()
 	return ch, s, h

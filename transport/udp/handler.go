@@ -12,8 +12,6 @@ import (
 	"github.com/Zwlin98/netstack/tcpip"
 )
 
-const inboundQueueSize = 256
-
 var errClosed = errors.New("udp: handler closed")
 
 // udpDatagram is an inbound UDP datagram queued for ReadFrom.
@@ -34,10 +32,14 @@ type UDPHandler struct {
 }
 
 // NewUDPHandler creates a UDPHandler.
-func NewUDPHandler(s *stack.Stack) *UDPHandler {
+func NewUDPHandler(s *stack.Stack, opts ...Option) *UDPHandler {
+	cfg := defaultConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	return &UDPHandler{
 		stk:     s,
-		inbound: make(chan udpDatagram, inboundQueueSize),
+		inbound: make(chan udpDatagram, cfg.InboundQueueSize),
 		done:    make(chan struct{}),
 	}
 }

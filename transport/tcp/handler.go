@@ -17,6 +17,7 @@ type TCPHandler struct {
 	conns    map[FlowID]*TCPConn
 	listener *TCPListener
 	stack    *stack.Stack
+	cfg      Config
 
 	wg sync.WaitGroup
 
@@ -26,14 +27,19 @@ type TCPHandler struct {
 }
 
 // NewTCPHandler creates a new TCPHandler.
-func NewTCPHandler(s *stack.Stack) *TCPHandler {
+func NewTCPHandler(s *stack.Stack, opts ...Option) *TCPHandler {
+	cfg := defaultConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	return &TCPHandler{
 		conns: make(map[FlowID]*TCPConn),
 		listener: &TCPListener{
-			acceptCh: make(chan *TCPConn, 16),
+			acceptCh: make(chan *TCPConn, cfg.AcceptQueueSize),
 			done:     make(chan struct{}),
 		},
 		stack:    s,
+		cfg:      cfg,
 		tsOffset: generateISN(), // random offset
 		tsEpoch:  time.Now(),
 	}
@@ -112,8 +118,9 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 	// Parse SYN options.
 	synOpts := header.ParseSynOptions(tcpHdr.Options())
 
-	readBuf := newRingBuffer(defaultBufSize)
-	writeBuf := newRingBuffer(defaultBufSize)
+	cfg := &h.cfg
+	readBuf := newRingBuffer(cfg.ReadBufferSize)
+	writeBuf := newRingBuffer(cfg.WriteBufferSize)
 
 	conn := &TCPConn{
 		flow:        flow,
@@ -125,15 +132,31 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 		writeBuf:    writeBuf,
 		writeNotify:  make(chan struct{}, 1),
 		windowNotify: make(chan struct{}, 1),
-		inbound:     make(chan *packet.PacketBuffer, 256),
+		inbound:     make(chan *packet.PacketBuffer, cfg.InboundQueueSize),
 		done:        make(chan struct{}),
 		closeCh:     make(chan struct{}, 1),
+
+		// Config snapshot.
+		keepaliveIdle:     cfg.KeepaliveIdle,
+		keepaliveInterval: cfg.KeepaliveInterval,
+		keepaliveCount:    cfg.KeepaliveCount,
+		finWait2Timeout:   cfg.FinWait2Timeout,
+		synRcvdTimeout:    cfg.SynRcvdTimeout,
+		timeWaitDuration:  cfg.TimeWaitDuration,
+		delayedACKTimeout: cfg.DelayedACKTimeout,
+		maxZWPInterval:    cfg.MaxZeroWindowProbeInterval,
+		rcvWndSize:        cfg.ReceiveWindowSize,
+		minRTO:            cfg.MinRTO,
+		maxRTO:            cfg.MaxRTO,
+		initialRTO:        cfg.InitialRTO,
+		maxRetries:        cfg.MaxRetries,
+		initialSSThresh:   cfg.InitialSSThresh,
 	}
 
 	// Window scaling: only enable if peer offered it.
 	if synOpts.WS >= 0 {
 		conn.sndWndScale = uint8(synOpts.WS)
-		conn.rcvWndScale = calculateWindowScale(defaultBufSize)
+		conn.rcvWndScale = calculateWindowScale(cfg.ReadBufferSize)
 	}
 
 	// SACK: only enable if peer offered it.

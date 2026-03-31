@@ -211,7 +211,7 @@ func TestQueueBackpressure(t *testing.T) {
 	dst := tcpip.From4(8, 8, 8, 8)
 
 	// Fill the queue beyond capacity.
-	for i := 0; i < inboundQueueSize+10; i++ {
+	for i := 0; i < defaultConfig.InboundQueueSize+10; i++ {
 		pkt := buildUDPPacket(src, dst, uint16(1000+i), 53, []byte("x"))
 		ch.Inject(pkt)
 	}
@@ -219,7 +219,7 @@ func TestQueueBackpressure(t *testing.T) {
 	// Wait for processing.
 	time.Sleep(200 * time.Millisecond)
 
-	// Should be able to drain exactly inboundQueueSize items.
+	// Should be able to drain exactly defaultConfig.InboundQueueSize items.
 	count := 0
 	for {
 		buf := make([]byte, 1500)
@@ -241,8 +241,8 @@ func TestQueueBackpressure(t *testing.T) {
 		}
 	}
 out:
-	if count != inboundQueueSize {
-		t.Errorf("drained %d datagrams, want %d", count, inboundQueueSize)
+	if count != defaultConfig.InboundQueueSize {
+		t.Errorf("drained %d datagrams, want %d", count, defaultConfig.InboundQueueSize)
 	}
 }
 

@@ -618,14 +618,9 @@ func TestSACKBlockCoalesced(t *testing.T) {
 
 // TestSynRcvdTimeout verifies that half-open connections are cleaned up after timeout.
 func TestSynRcvdTimeout(t *testing.T) {
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithSynRcvdTimeout(100*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
-
-	// Use short timeout for test.
-	old := tcp.SynRcvdTimeout
-	tcp.SynRcvdTimeout = 100 * time.Millisecond
-	defer func() { tcp.SynRcvdTimeout = old }()
 
 	clientAddr := tcpip.From4(10, 0, 0, 1)
 	serverAddr := tcpip.From4(10, 0, 0, 2)
@@ -656,13 +651,9 @@ func TestSynRcvdTimeout(t *testing.T) {
 // TestSynRcvdTimeoutCancelledOnHandshake verifies that completing the
 // handshake cancels the SYN_RCVD timeout.
 func TestSynRcvdTimeoutCancelledOnHandshake(t *testing.T) {
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithSynRcvdTimeout(200*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
-
-	old := tcp.SynRcvdTimeout
-	tcp.SynRcvdTimeout = 200 * time.Millisecond
-	defer func() { tcp.SynRcvdTimeout = old }()
 
 	clientAddr := tcpip.From4(10, 0, 0, 1)
 	serverAddr := tcpip.From4(10, 0, 0, 2)

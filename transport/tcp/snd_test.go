@@ -6,7 +6,7 @@ import (
 )
 
 func TestUpdateRTT_FirstMeasurement(t *testing.T) {
-	s := &sender{mss: 1460}
+	s := &sender{mss: 1460, minRTO: defaultConfig.MinRTO, maxRTO: defaultConfig.MaxRTO}
 
 	s.updateRTT(100 * time.Millisecond)
 
@@ -24,7 +24,7 @@ func TestUpdateRTT_FirstMeasurement(t *testing.T) {
 }
 
 func TestUpdateRTT_ConvergesWithStableInput(t *testing.T) {
-	s := &sender{mss: 1460}
+	s := &sender{mss: 1460, minRTO: defaultConfig.MinRTO, maxRTO: defaultConfig.MaxRTO}
 	stableRTT := 50 * time.Millisecond
 
 	// Feed 20 identical RTT measurements.
@@ -48,7 +48,7 @@ func TestUpdateRTT_ConvergesWithStableInput(t *testing.T) {
 }
 
 func TestUpdateRTT_TracksVariableInput(t *testing.T) {
-	s := &sender{mss: 1460}
+	s := &sender{mss: 1460, minRTO: defaultConfig.MinRTO, maxRTO: defaultConfig.MaxRTO}
 
 	// Alternate between 30ms and 70ms (mean=50ms, variation=20ms).
 	for i := 0; i < 40; i++ {
@@ -75,23 +75,23 @@ func TestUpdateRTT_TracksVariableInput(t *testing.T) {
 }
 
 func TestUpdateRTT_MinRTOBound(t *testing.T) {
-	s := &sender{mss: 1460}
+	s := &sender{mss: 1460, minRTO: defaultConfig.MinRTO, maxRTO: defaultConfig.MaxRTO}
 
 	// Very small RTT should still produce RTO >= 200ms.
 	s.updateRTT(1 * time.Millisecond)
 
-	if s.rto < minRTO {
-		t.Errorf("rto = %v, want >= %v", s.rto, minRTO)
+	if s.rto < defaultConfig.MinRTO {
+		t.Errorf("rto = %v, want >= %v", s.rto, defaultConfig.MinRTO)
 	}
 }
 
 func TestUpdateRTT_MaxRTOBound(t *testing.T) {
-	s := &sender{mss: 1460}
+	s := &sender{mss: 1460, minRTO: defaultConfig.MinRTO, maxRTO: defaultConfig.MaxRTO}
 
 	// Very large RTT.
 	s.updateRTT(100 * time.Second)
 
-	if s.rto > maxRTO {
-		t.Errorf("rto = %v, want <= %v", s.rto, maxRTO)
+	if s.rto > defaultConfig.MaxRTO {
+		t.Errorf("rto = %v, want <= %v", s.rto, defaultConfig.MaxRTO)
 	}
 }

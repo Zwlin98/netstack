@@ -2,16 +2,13 @@ package tcp
 
 import "github.com/Zwlin98/netstack/header"
 
-// rcvWndSize is the receive window advertised in SYN+ACK.
-const rcvWndSize = 65535
-
 func (c *TCPConn) handleSynRcvd(seg segment) {
 	if seg.flags.Has(header.TCPFlagACK) {
 		// Sequence number validation (RFC 793 Section 3.9 step 1).
 		// In SYN_RCVD, rcv.nxt = IRS+1. For a zero-length segment with
 		// non-zero window: acceptable if rcv.nxt <= seg.seq < rcv.nxt + rcv.wnd.
 		rcvNxt := c.irs + 1
-		if seg.seq-rcvNxt >= rcvWndSize {
+		if seg.seq-rcvNxt >= uint32(c.rcvWndSize) {
 			c.sendACK()
 			return
 		}
@@ -29,7 +26,13 @@ func (c *TCPConn) handleSynRcvd(seg segment) {
 			c.synRcvdTimer.Stop()
 		}
 
-		c.snd = newSender(c.iss, seg.wnd, c.sndWndScale, c.handler.stack.MTU(), c.peerMSS)
+		c.snd = newSender(c.iss, seg.wnd, c.sndWndScale, c.handler.stack.MTU(), c.peerMSS, senderConfig{
+			MinRTO:          c.minRTO,
+			MaxRTO:          c.maxRTO,
+			InitialRTO:      c.initialRTO,
+			MaxRetries:      c.maxRetries,
+			InitialSSThresh: c.initialSSThresh,
+		})
 		if c.tsEnabled {
 			c.snd.mss -= 12 // timestamp option overhead
 		}

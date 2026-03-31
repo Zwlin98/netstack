@@ -80,6 +80,6 @@ func (c *TCPConn) handleEstablished(seg segment) {
 		}
 
 		// Arm delayed ACK timer (200ms).
-		c.delayedACKTimer.Reset(delayedACKTimeout)
+		c.delayedACKTimer.Reset(c.delayedACKTimeout)
 	}
 }

@@ -78,7 +78,7 @@ func (c *TCPConn) sendSYNACK() {
 		AckNum:     c.irs + 1,
 		DataOffset: uint8(hdrSize / 4),
 		Flags:      header.TCPFlagSYN | header.TCPFlagACK,
-		WindowSize: 65535,
+		WindowSize: c.rcvWndSize,
 	})
 	copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
@@ -88,7 +88,7 @@ func (c *TCPConn) sendSYNACK() {
 func (c *TCPConn) sendACK() {
 	seqNum := c.iss + 1
 	ackNum := c.irs + 1
-	wnd := uint16(rcvWndSize)
+	wnd := uint16(c.rcvWndSize)
 
 	if c.snd != nil {
 		seqNum = c.snd.nxt
@@ -172,7 +172,7 @@ func (c *TCPConn) sendData(data []byte, seq uint32) {
 // sendFINSegment sends a FIN+ACK segment with the given sequence number.
 func (c *TCPConn) sendFINSegment(seq uint32) {
 	ackNum := c.irs + 1
-	wnd := uint16(rcvWndSize)
+	wnd := uint16(c.rcvWndSize)
 	if c.rcv != nil {
 		ackNum = c.rcv.nxt
 		wnd = c.rcv.wnd()

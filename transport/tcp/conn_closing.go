@@ -58,7 +58,7 @@ func (c *TCPConn) handleFinWait1(seg segment) {
 
 	if ackOfFIN {
 		c.state = stateFinWait2
-		c.finWait2Timer.Reset(FinWait2Timeout)
+		c.finWait2Timer.Reset(c.finWait2Timeout)
 	}
 }
 
@@ -73,7 +73,7 @@ func (c *TCPConn) handleFinWait2(seg segment) {
 	if len(seg.payload) > 0 && c.rcv != nil {
 		c.rcv.handleData(seg.seq, seg.payload)
 		// Reset FIN_WAIT_2 timer — peer is still active.
-		c.finWait2Timer.Reset(FinWait2Timeout)
+		c.finWait2Timer.Reset(c.finWait2Timeout)
 	}
 
 	if seg.flags.Has(header.TCPFlagFIN) && c.rcv != nil {
@@ -124,6 +124,6 @@ func (c *TCPConn) handleLastAck(seg segment) {
 func (c *TCPConn) handleTimeWait(seg segment) {
 	if seg.flags.Has(header.TCPFlagFIN) {
 		c.sendACK()
-		c.timeWaitTimer.Reset(timeWaitDuration)
+		c.timeWaitTimer.Reset(c.timeWaitDuration)
 	}
 }

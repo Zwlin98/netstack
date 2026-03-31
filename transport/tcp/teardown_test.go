@@ -17,10 +17,7 @@ import (
 // TestGracefulClose_FullLifecycle tests the complete lifecycle:
 // handshake → data transfer → graceful 4-way close.
 func TestGracefulClose_FullLifecycle(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(100 * time.Millisecond)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(100*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
 
@@ -184,10 +181,7 @@ func TestGracefulClose_PeerInitiated(t *testing.T) {
 // TestGracefulClose_TimeWaitExpiry tests that TIME_WAIT expires and connection
 // is removed from the connTable.
 func TestGracefulClose_TimeWaitExpiry(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(100 * time.Millisecond)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(100*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
 
@@ -246,9 +240,6 @@ func TestGracefulClose_TimeWaitExpiry(t *testing.T) {
 // TestGracefulClose_NoGoroutineLeak tests that no goroutines leak after
 // close + TIME_WAIT expiration.
 func TestGracefulClose_NoGoroutineLeak(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(50 * time.Millisecond)
-	defer restore()
-
 	// Stabilize goroutine count.
 	runtime.GC()
 	time.Sleep(100 * time.Millisecond)
@@ -256,7 +247,7 @@ func TestGracefulClose_NoGoroutineLeak(t *testing.T) {
 
 	ch := channel.NewMemory(1500)
 	s := stack.New(ch)
-	h := tcp.NewTCPHandler(s)
+	h := tcp.NewTCPHandler(s, tcp.WithTimeWaitDuration(50*time.Millisecond))
 	s.RegisterHandler(tcpip.TCPProtocolNumber, h)
 	s.Start()
 
@@ -413,10 +404,7 @@ func TestGracefulClose_FINRetransmission(t *testing.T) {
 // Closing immediately after connection establishment should send FIN+ACK.
 // Peer responds with FIN+ACK, and the stack sends a final ACK.
 func TestFinImmediately(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(100 * time.Millisecond)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(100*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
 
@@ -475,10 +463,7 @@ func TestFinImmediately(t *testing.T) {
 // FIN+ACK should be retransmitted when not acknowledged. After retransmit,
 // peer FIN+ACK completes the close.
 func TestFinRetransmit(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(100 * time.Millisecond)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(100*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
 
@@ -546,10 +531,7 @@ func TestFinRetransmit(t *testing.T) {
 // Writing data, having it acknowledged, then closing should produce a FIN
 // with sequence number immediately following the data.
 func TestFinWithNoPendingData(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(100 * time.Millisecond)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(100*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
 
@@ -628,10 +610,7 @@ func TestFinWithNoPendingData(t *testing.T) {
 // Writing data, ACKing it (opening cwnd), writing more data (unacked), then
 // closing should send the pending data followed by a FIN.
 func TestFinWithPendingData(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(100 * time.Millisecond)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(100*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
 
@@ -832,10 +811,7 @@ func TestFinWithPartialAck(t *testing.T) {
 // RST received in TIME_WAIT should be silently ignored (RFC 1337).
 // An out-of-order ACK in TIME_WAIT should generate an immediate ACK.
 func TestTCPTimeWaitRSTIgnored(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(2 * time.Second)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(2*time.Second))
 	defer s.Stop()
 	defer h.Close()
 
@@ -902,10 +878,7 @@ func TestTCPTimeWaitRSTIgnored(t *testing.T) {
 // TIME_WAIT timer. The connection should remain in TIME_WAIT past the
 // original timer, only closing after the extended duration.
 func TestTCPTimeWaitDuplicateFINExtendsTimeWait(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(300 * time.Millisecond)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(300*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
 
@@ -1082,10 +1055,7 @@ func TestTCPCloseWithData(t *testing.T) {
 // should be buffered and readable even after the connection transitions through
 // TIME_WAIT to CLOSED.
 func TestReadAfterClosedState(t *testing.T) {
-	restore := tcp.SetTimeWaitDuration(100 * time.Millisecond)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(100*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
 

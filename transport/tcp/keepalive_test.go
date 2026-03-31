@@ -9,29 +9,14 @@ import (
 	"github.com/Zwlin98/netstack/transport/tcp"
 )
 
-// setKeepaliveTestParams overrides keepalive timing for fast tests
-// and returns a cleanup function to restore defaults.
-func setKeepaliveTestParams(idle, interval time.Duration, count int) func() {
-	origIdle := tcp.KeepaliveIdle
-	origInterval := tcp.KeepaliveInterval
-	origCount := tcp.KeepaliveCount
-	tcp.KeepaliveIdle = idle
-	tcp.KeepaliveInterval = interval
-	tcp.KeepaliveCount = count
-	return func() {
-		tcp.KeepaliveIdle = origIdle
-		tcp.KeepaliveInterval = origInterval
-		tcp.KeepaliveCount = origCount
-	}
-}
-
 // TestKeepalive_IdleTimeoutTriggersProbe verifies that after the idle
 // timeout, a keepalive probe is sent.
 func TestKeepalive_IdleTimeoutTriggersProbe(t *testing.T) {
-	restore := setKeepaliveTestParams(500*time.Millisecond, 200*time.Millisecond, 3)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t,
+		tcp.WithKeepaliveIdle(500*time.Millisecond),
+		tcp.WithKeepaliveInterval(200*time.Millisecond),
+		tcp.WithKeepaliveCount(3),
+	)
 	defer s.Stop()
 	defer h.Close()
 
@@ -67,10 +52,11 @@ func TestKeepalive_IdleTimeoutTriggersProbe(t *testing.T) {
 // TestKeepalive_PeerResponseResetsProbes verifies that when the peer
 // responds to a keepalive probe, the probe count is reset.
 func TestKeepalive_PeerResponseResetsProbes(t *testing.T) {
-	restore := setKeepaliveTestParams(300*time.Millisecond, 200*time.Millisecond, 3)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t,
+		tcp.WithKeepaliveIdle(300*time.Millisecond),
+		tcp.WithKeepaliveInterval(200*time.Millisecond),
+		tcp.WithKeepaliveCount(3),
+	)
 	defer s.Stop()
 	defer h.Close()
 
@@ -104,10 +90,11 @@ func TestKeepalive_PeerResponseResetsProbes(t *testing.T) {
 // TestKeepalive_DeadPeerDetected verifies that after keepaliveCount
 // unanswered probes, the connection is aborted with RST.
 func TestKeepalive_DeadPeerDetected(t *testing.T) {
-	restore := setKeepaliveTestParams(200*time.Millisecond, 100*time.Millisecond, 3)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t,
+		tcp.WithKeepaliveIdle(200*time.Millisecond),
+		tcp.WithKeepaliveInterval(100*time.Millisecond),
+		tcp.WithKeepaliveCount(3),
+	)
 	defer s.Stop()
 	defer h.Close()
 
@@ -147,10 +134,11 @@ func TestKeepalive_DeadPeerDetected(t *testing.T) {
 // TestKeepalive_ActivityResetsIdleTimer verifies that data transfer
 // resets the keepalive idle timer.
 func TestKeepalive_ActivityResetsIdleTimer(t *testing.T) {
-	restore := setKeepaliveTestParams(500*time.Millisecond, 200*time.Millisecond, 3)
-	defer restore()
-
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t,
+		tcp.WithKeepaliveIdle(500*time.Millisecond),
+		tcp.WithKeepaliveInterval(200*time.Millisecond),
+		tcp.WithKeepaliveCount(3),
+	)
 	defer s.Stop()
 	defer h.Close()
 

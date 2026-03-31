@@ -22,16 +22,23 @@ type Stack struct {
 
 	handlers map[tcpip.TransportProtocolNumber]TransportHandler
 
+	ttl uint8
+
 	wg   sync.WaitGroup
 	done chan struct{}
 }
 
 // New creates a new Stack using the given Channel.
-func New(ch channel.Channel) *Stack {
+func New(ch channel.Channel, opts ...Option) *Stack {
+	cfg := defaultConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	return &Stack{
 		channel:    ch,
-		outboundCh: make(chan *packet.PacketBuffer, 256),
+		outboundCh: make(chan *packet.PacketBuffer, cfg.OutboundQueueSize),
 		handlers:   make(map[tcpip.TransportProtocolNumber]TransportHandler),
+		ttl:        cfg.TTL,
 		done:       make(chan struct{}),
 	}
 }
@@ -66,7 +73,7 @@ func (s *Stack) SendPacket(pb *packet.PacketBuffer, src, dst tcpip.Address, prot
 	ip := header.IPv4(ipSlice)
 	ip.Encode(&header.IPv4Fields{
 		TotalLength: uint16(len(pb.AsSlice())),
-		TTL:         64,
+		TTL:         s.ttl,
 		Protocol:    proto,
 		SrcAddr:     src,
 		DstAddr:     dst,

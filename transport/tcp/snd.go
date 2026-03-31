@@ -6,15 +6,6 @@ import (
 	"github.com/Zwlin98/netstack/header"
 )
 
-const (
-	minRTO     = 200 * time.Millisecond
-	maxRTO     = 60 * time.Second
-	initialRTO = time.Second
-
-	defaultMaxRetries = 15
-	initialSSThresh   = 65535
-)
-
 // unackedSegment holds a copy of a sent segment for possible retransmission.
 type unackedSegment struct {
 	seq           uint32
@@ -37,6 +28,8 @@ type sender struct {
 	rto        time.Duration
 	srtt       time.Duration
 	rttvar     time.Duration
+	minRTO     time.Duration
+	maxRTO     time.Duration
 	unacked    []unackedSegment
 	retries    int
 	maxRetries int
@@ -51,7 +44,7 @@ type sender struct {
 	recoveryPoint uint32 // SND.NXT at recovery entry; full ACK past this exits recovery
 }
 
-func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int, peerMSS uint16) *sender {
+func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int, peerMSS uint16, cfg senderConfig) *sender {
 	mss := mtu - header.IPv4MinHeaderSize - header.TCPMinHeaderSize
 	if mss <= 0 {
 		mss = 536 // RFC 879 default
@@ -73,11 +66,22 @@ func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int, peerMSS uint
 		una:        iss + 1,
 		wnd:        uint32(peerWnd) << wndScale,
 		mss:        mss,
-		rto:        initialRTO,
-		maxRetries: defaultMaxRetries,
+		rto:        cfg.InitialRTO,
+		minRTO:     cfg.MinRTO,
+		maxRTO:     cfg.MaxRTO,
+		maxRetries: cfg.MaxRetries,
 		cwnd:       iw,
-		ssthresh:   initialSSThresh,
+		ssthresh:   cfg.InitialSSThresh,
 	}
+}
+
+// senderConfig holds sender parameters extracted from the connection config.
+type senderConfig struct {
+	MinRTO          time.Duration
+	MaxRTO          time.Duration
+	InitialRTO      time.Duration
+	MaxRetries      int
+	InitialSSThresh uint32
 }
 
 // effectiveWindow returns how many bytes the sender may still have in flight.
@@ -132,8 +136,8 @@ func (s *sender) updateRTT(measured time.Duration) {
 		s.srtt = (7*s.srtt + measured) / 8
 	}
 	s.rto = s.srtt + 4*s.rttvar
-	s.rto = max(s.rto, minRTO)
-	s.rto = min(s.rto, maxRTO)
+	s.rto = max(s.rto, s.minRTO)
+	s.rto = min(s.rto, s.maxRTO)
 }
 
 // recordSent saves a copy of sent data for possible retransmission.
@@ -229,7 +233,7 @@ func (s *sender) handleRTO(conn *TCPConn) {
 
 	// Exponential backoff.
 	s.rto *= 2
-	s.rto = min(s.rto, maxRTO)
+	s.rto = min(s.rto, s.maxRTO)
 
 	// Clear SACK marks — on RTO we don't trust previous SACK info.
 	for i := range s.unacked {

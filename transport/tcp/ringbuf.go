@@ -6,8 +6,6 @@ import (
 	"sync"
 )
 
-const defaultBufSize = 256 * 1024 // 256KB
-
 var errBufferClosed = errors.New("ring buffer closed")
 
 // ringBuffer is a circular byte buffer with blocking Read/Write.

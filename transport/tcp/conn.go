@@ -12,27 +12,6 @@ import (
 	"github.com/Zwlin98/netstack/tcpip"
 )
 
-var timeWaitDuration = 2 * time.Minute // 2*MSL (MSL = 1 minute)
-
-const (
-	delayedACKTimeout          = 200 * time.Millisecond
-	maxZeroWindowProbeInterval = 60 * time.Second
-)
-
-// FIN_WAIT_2 timeout (RFC 1122 §4.2.2.13). Exported var for test override.
-var FinWait2Timeout = 60 * time.Second
-
-// SYN_RCVD timeout: half-open connections are cleaned up after this duration.
-// Exported var for test override.
-var SynRcvdTimeout = 75 * time.Second
-
-// TCP Keepalive defaults (RFC 1122 Section 4.2.3.6).
-// Exported vars to allow test override.
-var (
-	KeepaliveIdle     = 7200 * time.Second // 2 hours
-	KeepaliveInterval = 75 * time.Second
-	KeepaliveCount    = 9
-)
 
 // TCPConn represents a single TCP connection.
 type TCPConn struct {
@@ -114,6 +93,22 @@ type TCPConn struct {
 
 	// SYN_RCVD timer: close half-open connections that never complete handshake.
 	synRcvdTimer *time.Timer
+
+	// Config snapshots (set at creation, immutable for connection lifetime).
+	keepaliveIdle     time.Duration
+	keepaliveInterval time.Duration
+	keepaliveCount    int
+	finWait2Timeout   time.Duration
+	synRcvdTimeout    time.Duration
+	timeWaitDuration  time.Duration
+	delayedACKTimeout time.Duration
+	maxZWPInterval    time.Duration
+	rcvWndSize        uint16
+	minRTO            time.Duration
+	maxRTO            time.Duration
+	initialRTO        time.Duration
+	maxRetries        int
+	initialSSThresh   uint32
 }
 
 // SetNoDelay enables or disables the Nagle algorithm.
@@ -326,7 +321,7 @@ func (c *TCPConn) sendKeepaliveProbe() {
 func (c *TCPConn) resetKeepalive() {
 	if c.keepaliveTimer != nil {
 		c.keepaliveProbes = 0
-		c.keepaliveTimer.Reset(KeepaliveIdle)
+		c.keepaliveTimer.Reset(c.keepaliveIdle)
 	}
 }
 
@@ -381,7 +376,7 @@ func (c *TCPConn) run() {
 	}
 	defer c.synRcvdTimer.Stop()
 	if c.state == stateSynRcvd {
-		c.synRcvdTimer.Reset(SynRcvdTimeout)
+		c.synRcvdTimer.Reset(c.synRcvdTimeout)
 	}
 
 	for {
@@ -428,8 +423,8 @@ func (c *TCPConn) run() {
 			if c.snd != nil && c.zeroWindowProbing {
 				c.sendZeroWindowProbe()
 				c.probeInterval *= 2
-				if c.probeInterval > maxZeroWindowProbeInterval {
-					c.probeInterval = maxZeroWindowProbeInterval
+				if c.probeInterval > c.maxZWPInterval {
+					c.probeInterval = c.maxZWPInterval
 				}
 				c.zeroWindowTimer.Reset(c.probeInterval)
 			}
@@ -439,11 +434,11 @@ func (c *TCPConn) run() {
 				// Don't send keepalive probes while data is pending —
 				// RTO retransmission already provides liveness detection.
 				if c.snd.hasUnacked() {
-					c.keepaliveTimer.Reset(KeepaliveIdle)
+					c.keepaliveTimer.Reset(c.keepaliveIdle)
 					continue
 				}
 				c.keepaliveProbes++
-				if c.keepaliveProbes > KeepaliveCount {
+				if c.keepaliveProbes > c.keepaliveCount {
 					// Dead peer detected — abort with RST.
 					c.sendRSTSegment(c.snd.nxt)
 					c.closeDone()
@@ -452,7 +447,7 @@ func (c *TCPConn) run() {
 				}
 				// Send keepalive probe: seq = snd.una - 1, no data, ACK flag.
 				c.sendKeepaliveProbe()
-				c.keepaliveTimer.Reset(KeepaliveInterval)
+				c.keepaliveTimer.Reset(c.keepaliveInterval)
 			}
 
 		case <-c.writeNotify:
@@ -566,7 +561,7 @@ func (c *TCPConn) enterTimeWait() {
 	if !c.readShutdown {
 		c.readBuf.CloseWrite()
 	}
-	c.timeWaitTimer.Reset(timeWaitDuration)
+	c.timeWaitTimer.Reset(c.timeWaitDuration)
 }
 
 // abort sends RST and closes the connection (used when max retries exceeded).
@@ -612,7 +607,7 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 		} else {
 			// SYN_RCVD: rcv not yet initialized.
 			rcvNxt = c.irs + 1
-			rcvWnd = uint32(rcvWndSize)
+			rcvWnd = uint32(c.rcvWndSize)
 		}
 		if seg.seq == rcvNxt {
 			// Exact match — accept RST.

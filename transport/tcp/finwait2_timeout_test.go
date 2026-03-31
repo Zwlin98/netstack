@@ -11,14 +11,11 @@ import (
 
 // TestFinWait2Timeout verifies that FIN_WAIT_2 times out when peer doesn't send FIN.
 func TestFinWait2Timeout(t *testing.T) {
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t,
+		tcp.WithFinWait2Timeout(500*time.Millisecond),
+	)
 	defer s.Stop()
 	defer h.Close()
-
-	// Use short timeout for test.
-	old := tcp.FinWait2Timeout
-	tcp.FinWait2Timeout = 500 * time.Millisecond
-	defer func() { tcp.FinWait2Timeout = old }()
 
 	clientAddr := tcpip.From4(10, 0, 0, 1)
 	serverAddr := tcpip.From4(10, 0, 0, 2)
@@ -68,16 +65,12 @@ func TestFinWait2Timeout(t *testing.T) {
 
 // TestFinWait2NormalFIN verifies normal FIN arrival before timeout.
 func TestFinWait2NormalFIN(t *testing.T) {
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t,
+		tcp.WithTimeWaitDuration(200*time.Millisecond),
+		tcp.WithFinWait2Timeout(2*time.Second),
+	)
 	defer s.Stop()
 	defer h.Close()
-
-	restore := tcp.SetTimeWaitDuration(200 * time.Millisecond)
-	defer restore()
-
-	old := tcp.FinWait2Timeout
-	tcp.FinWait2Timeout = 2 * time.Second
-	defer func() { tcp.FinWait2Timeout = old }()
 
 	clientAddr := tcpip.From4(10, 0, 0, 1)
 	serverAddr := tcpip.From4(10, 0, 0, 2)

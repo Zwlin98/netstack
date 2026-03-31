@@ -11,12 +11,9 @@ import (
 
 // TestSimultaneousClose verifies the CLOSING state transition during simultaneous close.
 func TestSimultaneousClose(t *testing.T) {
-	ch, s, h := setupStack(t)
+	ch, s, h := setupStack(t, tcp.WithTimeWaitDuration(200*time.Millisecond))
 	defer s.Stop()
 	defer h.Close()
-
-	restore := tcp.SetTimeWaitDuration(200 * time.Millisecond)
-	defer restore()
 
 	clientAddr := tcpip.From4(10, 0, 0, 1)
 	serverAddr := tcpip.From4(10, 0, 0, 2)
