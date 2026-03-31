@@ -10,7 +10,7 @@ log "=== TCP 256KB + 1 Mbit/s limit ==="
 # tbf: rate=1mbit, burst=32kbit (buffer for token bucket), latency=400ms (max queue delay)
 tc qdisc add dev $TUN_DEV root tbf rate 1mbit burst 32kbit latency 400ms
 START=$(date +%s)
-nc -w 30 "$TUN_IP" "$PORT" < "$TMPDIR/256k" > "$TMPDIR/256k_1m" 2>/dev/null
+nc -N -w 30 "$TUN_IP" "$PORT" < "$TMPDIR/256k" > "$TMPDIR/256k_1m" 2>/dev/null
 ELAPSED=$(( $(date +%s) - START ))
 tc qdisc del dev $TUN_DEV root 2>/dev/null
 if check_md5 "$TMPDIR/256k" "$TMPDIR/256k_1m"; then
@@ -24,7 +24,7 @@ log "=== TCP 256KB + 10 Mbit/s limit + 5% loss ==="
 tc qdisc add dev $TUN_DEV root handle 1: netem loss 5%
 tc qdisc add dev $TUN_DEV parent 1:1 handle 2: tbf rate 10mbit burst 64kbit latency 400ms
 START=$(date +%s)
-nc -w 30 "$TUN_IP" "$PORT" < "$TMPDIR/256k" > "$TMPDIR/256k_10m_loss" 2>/dev/null
+nc -N -w 30 "$TUN_IP" "$PORT" < "$TMPDIR/256k" > "$TMPDIR/256k_10m_loss" 2>/dev/null
 ELAPSED=$(( $(date +%s) - START ))
 tc qdisc del dev $TUN_DEV root 2>/dev/null
 if check_md5 "$TMPDIR/256k" "$TMPDIR/256k_10m_loss"; then

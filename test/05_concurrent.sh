@@ -10,10 +10,12 @@ dd if=/dev/urandom of="$TMPDIR/small" bs=1K count=1 2>/dev/null
 EXPECTED=$(md5sum "$TMPDIR/small" | awk '{print $1}')
 mkdir -p "$TMPDIR/conc"
 
+PIDS=()
 for i in $(seq 1 $N); do
-    (nc -w 5 "$TUN_IP" "$PORT" < "$TMPDIR/small" > "$TMPDIR/conc/$i" 2>/dev/null) &
+    (nc -N -w 5 "$TUN_IP" "$PORT" < "$TMPDIR/small" > "$TMPDIR/conc/$i" 2>/dev/null) &
+    PIDS+=($!)
 done
-wait
+for p in "${PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
 
 CONC_PASS=0
 for i in $(seq 1 $N); do

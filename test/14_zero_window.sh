@@ -30,7 +30,7 @@ dd if=/dev/urandom of="$TMPDIR/512k" bs=1K count=512 2>/dev/null
 
 log "=== TCP 1MB + read-delay 50ms (zero-window) ==="
 START=$(date +%s)
-nc -w 120 "$TUN_IP" "$PORT" < "$TMPDIR/1m" > "$TMPDIR/1m_zerowin" 2>/dev/null
+nc -N -w 120 "$TUN_IP" "$PORT" < "$TMPDIR/1m" > "$TMPDIR/1m_zerowin" 2>/dev/null
 ELAPSED=$(( $(date +%s) - START ))
 if check_md5 "$TMPDIR/1m" "$TMPDIR/1m_zerowin"; then
     pass "1MB echo with read-delay 50ms (${ELAPSED}s)"
@@ -41,7 +41,7 @@ fi
 log "=== TCP 512KB + read-delay 50ms + 3% loss ==="
 tc qdisc add dev $TUN_DEV root netem loss 3%
 START=$(date +%s)
-nc -w 120 "$TUN_IP" "$PORT" < "$TMPDIR/512k" > "$TMPDIR/512k_zerowin_loss" 2>/dev/null
+nc -N -w 120 "$TUN_IP" "$PORT" < "$TMPDIR/512k" > "$TMPDIR/512k_zerowin_loss" 2>/dev/null
 ELAPSED=$(( $(date +%s) - START ))
 tc qdisc del dev $TUN_DEV root 2>/dev/null
 if check_md5 "$TMPDIR/512k" "$TMPDIR/512k_zerowin_loss"; then
