@@ -146,7 +146,21 @@ udpHandler := udp.NewUDPHandler(s,
 
 ### 接入 TUN 设备
 
-实现 `channel.Channel` 接口即可接入真实 TUN 设备：
+内置 `channel/tun` 包，直接创建 Linux TUN 设备（需要 root 权限）：
+
+```go
+import "github.com/Zwlin98/netstack/channel/tun"
+
+ch, err := tun.NewChannel("tun0", 1500)
+if err != nil {
+    log.Fatal(err)
+}
+
+s := stack.New(ch)
+// ... 注册 handler、启动 ...
+```
+
+如需对接其他网络设备，实现 `channel.Channel` 接口即可：
 
 ```go
 type Channel interface {
