@@ -9,7 +9,7 @@
   - TCP 选项：MSS、窗口缩放 (RFC 7323)、SACK (RFC 2018)
   - 拥塞控制：New Reno 快速恢复 (RFC 5681)
   - 可靠重传：RTO 定时器、最大重试限制
-- **UDP** — NAT 转发，自动将虚拟网络的 UDP 流量转发到真实网络
+- **UDP** — PacketConn 风格 API（ReadFrom / WriteTo），上层自由处理数据
 - **ICMP** — 自动 Echo Reply（ping 响应）
 - 零拷贝包缓冲区 + `sync.Pool` 对象复用
 
@@ -21,7 +21,7 @@ graph TB
 
     subgraph Transport["传输层"]
         TCP["TCPHandler<br/>TCPListener / TCPConn"]
-        UDP["UDPHandler<br/>NATTable"]
+        UDP["UDPHandler<br/>ReadFrom / WriteTo"]
     end
 
     Stack["Stack<br/>IPv4 解析 · 协议分发 · ICMP 应答"]
@@ -113,19 +113,30 @@ type Channel interface {
 }
 ```
 
-### UDP NAT 转发
+### UDP 数据报收发
 
-UDP 处理器自动将虚拟网络流量 NAT 转发到真实网络：
+UDP handler 提供 `net.PacketConn` 风格的 API，上层自行决定如何处理数据（NAT 转发、DNS 劫持、过滤等）：
 
 ```go
 udpHandler := udp.NewUDPHandler(s)
-udpHandler.SetNewSessionCallback(func(flow udp.FlowID) bool {
-	return true // 接受所有 UDP 流
-})
 s.RegisterHandler(tcpip.UDPProtocolNumber, udpHandler)
-```
 
-DNS 查询（端口 53）使用 10 秒短超时，其他 UDP 流量 60 秒超时。
+go func() {
+	buf := make([]byte, 1500)
+	for {
+		// 读取入站 UDP 数据报（纯 payload，不含协议头）
+		n, src, dst, err := udpHandler.ReadFrom(buf)
+		if err != nil {
+			break
+		}
+		// src = 客户端地址, dst = 原始目标地址
+		// 上层自行决定处理方式：转发、修改、丢弃...
+		resp := handleUDP(dst, buf[:n])
+		// 将响应写回客户端（handler 自动构建 UDP+IPv4 头）
+		udpHandler.WriteTo(resp, dst, src)
+	}
+}()
+```
 
 ## 包结构
 
@@ -137,7 +148,7 @@ DNS 查询（端口 53）使用 10 秒短超时，其他 UDP 流量 60 秒超时
 | `channel` | `Channel` 接口 + `MemoryChannel`（内存实现，用于测试） |
 | `stack` | 协议栈核心：IPv4 解析、协议分发、ICMP、读写循环 |
 | `transport/tcp` | TCP 实现：`TCPHandler` / `TCPListener` / `TCPConn` |
-| `transport/udp` | UDP NAT 转发：`UDPHandler` / `NATTable` |
+| `transport/udp` | UDP 数据报收发：`UDPHandler`（ReadFrom / WriteTo） |
 
 ## TCP 状态机
 
