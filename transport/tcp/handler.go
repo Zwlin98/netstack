@@ -102,6 +102,7 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 		writeNotify: make(chan struct{}, 1),
 		inbound:     make(chan *packet.PacketBuffer, 16),
 		done:        make(chan struct{}),
+		closeCh:     make(chan struct{}, 1),
 	}
 
 	h.mu.Lock()
@@ -135,7 +136,7 @@ func (h *TCPHandler) Close() error {
 	h.mu.Unlock()
 
 	for _, c := range conns {
-		c.Close()
+		c.ForceClose()
 	}
 
 	h.wg.Wait()

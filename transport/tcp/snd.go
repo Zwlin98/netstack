@@ -17,9 +17,10 @@ const (
 
 // unackedSegment holds a copy of a sent segment for possible retransmission.
 type unackedSegment struct {
-	seq         uint32
-	data        []byte
-	sentAt      time.Time
+	seq           uint32
+	data          []byte
+	fin           bool // true if this is a FIN segment
+	sentAt        time.Time
 	retransmitted bool
 }
 
@@ -131,6 +132,9 @@ func (s *sender) removeAcked(ack uint32) {
 	for i < len(s.unacked) {
 		seg := &s.unacked[i]
 		segEnd := seg.seq + uint32(len(seg.data))
+		if seg.fin {
+			segEnd = seg.seq + 1 // FIN occupies one sequence number
+		}
 		if !seqGreaterThan(ack, seg.seq) {
 			break
 		}
@@ -148,6 +152,15 @@ func (s *sender) removeAcked(ack uint32) {
 	s.unacked = s.unacked[i:]
 }
 
+// recordSentFIN records a FIN segment for retransmission tracking.
+func (s *sender) recordSentFIN(seq uint32) {
+	s.unacked = append(s.unacked, unackedSegment{
+		seq:    seq,
+		fin:    true,
+		sentAt: time.Now(),
+	})
+}
+
 // hasUnacked returns true if there are segments awaiting acknowledgment.
 func (s *sender) hasUnacked() bool {
 	return len(s.unacked) > 0
@@ -161,7 +174,11 @@ func (s *sender) retransmitOldest(conn *TCPConn) {
 	seg := &s.unacked[0]
 	seg.retransmitted = true
 	seg.sentAt = time.Now()
-	conn.sendData(seg.data, seg.seq)
+	if seg.fin {
+		conn.sendFINSegment(seg.seq)
+	} else {
+		conn.sendData(seg.data, seg.seq)
+	}
 }
 
 // handleRTO is called when the retransmission timer expires.

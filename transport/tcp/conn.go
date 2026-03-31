@@ -12,6 +12,8 @@ import (
 	"github.com/Zwlin98/netstack/tcpip"
 )
 
+var timeWaitDuration = 2 * time.Minute // 2*MSL (MSL = 1 minute)
+
 // TCPConn represents a single TCP connection.
 type TCPConn struct {
 	flow    FlowID
@@ -36,7 +38,14 @@ type TCPConn struct {
 	inbound chan *packet.PacketBuffer
 
 	done      chan struct{}
-	closeOnce sync.Once
+	closeOnce sync.Once // guards graceful Close (FIN)
+	doneOnce  sync.Once // guards close(done)
+
+	// Graceful close: app signals run loop via closeCh.
+	closeCh chan struct{}
+
+	// TIME_WAIT timer, managed within run loop.
+	timeWaitTimer *time.Timer
 }
 
 // OriginalDst returns the original destination address of the connection.
@@ -45,7 +54,7 @@ func (c *TCPConn) OriginalDst() tcpip.FullAddress {
 }
 
 func (c *TCPConn) closeDone() {
-	c.closeOnce.Do(func() {
+	c.doneOnce.Do(func() {
 		c.state = stateClosed
 		close(c.done)
 	})
@@ -61,6 +70,7 @@ func (c *TCPConn) Read(b []byte) (int, error) {
 }
 
 // Write writes data to the connection. Blocks until all data is written.
+// Returns an error if the connection is closing or closed.
 func (c *TCPConn) Write(b []byte) (int, error) {
 	if c.writeBuf == nil {
 		return 0, errBufferClosed
@@ -76,19 +86,34 @@ func (c *TCPConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// Close shuts down the connection, sending RST to the remote peer.
+// Close initiates a graceful FIN-based close. Non-blocking: returns
+// immediately after signaling the run loop. Write() will return an error
+// after Close(); Read() continues to drain buffered data until EOF.
 func (c *TCPConn) Close() {
+	c.closeOnce.Do(func() {
+		c.writeBuf.CloseWrite()
+		select {
+		case c.closeCh <- struct{}{}:
+		default:
+		}
+	})
+}
+
+// ForceClose sends RST and tears down the connection immediately.
+func (c *TCPConn) ForceClose() error {
 	if c.state == stateEstablished && c.snd != nil {
 		c.sendRSTSegment(c.snd.nxt)
 	}
 	c.closeDone()
 	c.handler.removeConn(c.flow)
+	return nil
 }
 
-// ForceClose sends RST and tears down the connection immediately.
-func (c *TCPConn) ForceClose() error {
-	c.Close()
-	return nil
+// sendFIN sends a FIN+ACK and records it for retransmission.
+func (c *TCPConn) sendFIN() {
+	c.sendFINSegment(c.snd.nxt)
+	c.snd.recordSentFIN(c.snd.nxt)
+	c.snd.nxt++ // FIN occupies one sequence number
 }
 
 func (c *TCPConn) handleRST() {
@@ -104,6 +129,12 @@ func (c *TCPConn) run() {
 		<-rtoTimer.C
 	}
 	defer rtoTimer.Stop()
+
+	c.timeWaitTimer = time.NewTimer(0)
+	if !c.timeWaitTimer.Stop() {
+		<-c.timeWaitTimer.C
+	}
+	defer c.timeWaitTimer.Stop()
 
 	for {
 		select {
@@ -140,10 +171,39 @@ func (c *TCPConn) run() {
 				}
 			}
 
+		case <-c.closeCh:
+			c.handleClose()
+			if c.snd != nil && c.snd.hasUnacked() {
+				rtoTimer.Reset(c.snd.rto)
+			}
+
+		case <-c.timeWaitTimer.C:
+			// TIME_WAIT expired → CLOSED.
+			return
+
 		case <-c.done:
 			return
 		}
 	}
+}
+
+// handleClose processes a graceful close request from the application.
+func (c *TCPConn) handleClose() {
+	switch c.state {
+	case stateEstablished:
+		c.sendFIN()
+		c.state = stateFinWait1
+	case stateCloseWait:
+		c.sendFIN()
+		c.state = stateLastAck
+	}
+}
+
+// enterTimeWait transitions to TIME_WAIT state and starts the 2*MSL timer.
+func (c *TCPConn) enterTimeWait() {
+	c.state = stateTimeWait
+	c.readBuf.CloseWrite()
+	c.timeWaitTimer.Reset(timeWaitDuration)
 }
 
 // abort sends RST and closes the connection (used when max retries exceeded).
@@ -157,8 +217,12 @@ func (c *TCPConn) abort() {
 func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 	seg := parseSeg(pb)
 
-	// Common: RST handling applies to all states.
+	// Common: RST handling applies to all states except TIME_WAIT.
+	// RFC 1337: Ignore RST in TIME_WAIT to prevent TIME-WAIT assassination.
 	if seg.flags.Has(header.TCPFlagRST) {
+		if c.state == stateTimeWait {
+			return
+		}
 		c.handleRST()
 		return
 	}
@@ -174,6 +238,20 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 		c.handleSynRcvd(seg)
 	case stateEstablished:
 		c.handleEstablished(seg)
+	case stateFinWait1:
+		c.handleFinWait1(seg)
+	case stateFinWait2:
+		c.handleFinWait2(seg)
+	case stateCloseWait:
+		// In CLOSE_WAIT, we still process ACKs for our data.
+		if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
+			c.snd.wnd = seg.wnd
+			c.snd.handleACK(seg.ack, c)
+		}
+	case stateLastAck:
+		c.handleLastAck(seg)
+	case stateTimeWait:
+		c.handleTimeWait(seg)
 	}
 }
 

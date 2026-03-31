@@ -19,8 +19,19 @@ func (c *TCPConn) handleEstablished(seg segment) {
 	// Data delivery.
 	if len(seg.payload) > 0 && c.rcv != nil {
 		c.rcv.handleData(seg.seq, seg.payload)
-		c.sendACK()
 	}
 
-	// P4d will add: FIN handling → CLOSE_WAIT transition.
+	// FIN handling: peer is closing their send side.
+	if seg.flags.Has(header.TCPFlagFIN) && c.rcv != nil {
+		c.rcv.nxt++ // FIN occupies one sequence number
+		c.sendACK() // single ACK covers data + FIN
+		c.readBuf.CloseWrite()
+		c.state = stateCloseWait
+		return
+	}
+
+	// ACK for data only (no FIN in this segment).
+	if len(seg.payload) > 0 {
+		c.sendACK()
+	}
 }

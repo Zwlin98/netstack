@@ -6,6 +6,11 @@ const (
 	stateClosed tcpState = iota
 	stateSynRcvd
 	stateEstablished
+	stateFinWait1
+	stateFinWait2
+	stateCloseWait
+	stateLastAck
+	stateTimeWait
 )
 
 func (s tcpState) String() string {
@@ -16,6 +21,16 @@ func (s tcpState) String() string {
 		return "SYN_RCVD"
 	case stateEstablished:
 		return "ESTABLISHED"
+	case stateFinWait1:
+		return "FIN_WAIT_1"
+	case stateFinWait2:
+		return "FIN_WAIT_2"
+	case stateCloseWait:
+		return "CLOSE_WAIT"
+	case stateLastAck:
+		return "LAST_ACK"
+	case stateTimeWait:
+		return "TIME_WAIT"
 	default:
 		return "UNKNOWN"
 	}

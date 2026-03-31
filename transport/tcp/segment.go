@@ -105,6 +105,31 @@ func (c *TCPConn) sendData(data []byte, seq uint32) {
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 }
 
+// sendFINSegment sends a FIN+ACK segment with the given sequence number.
+func (c *TCPConn) sendFINSegment(seq uint32) {
+	ackNum := c.irs + 1
+	wnd := uint16(rcvWndSize)
+	if c.rcv != nil {
+		ackNum = c.rcv.nxt
+		wnd = c.rcv.wnd()
+	}
+
+	pb := packet.NewPacketBuffer(packet.MaxHeadroom)
+	tcpBuf := pb.Prepend(header.TCPMinHeaderSize)
+	hdr := header.TCP(tcpBuf)
+	hdr.Encode(&header.TCPFields{
+		SrcPort:    c.flow.DstPort,
+		DstPort:    c.flow.SrcPort,
+		SeqNum:     seq,
+		AckNum:     ackNum,
+		DataOffset: header.TCPMinHeaderSize / 4,
+		Flags:      header.TCPFlagFIN | header.TCPFlagACK,
+		WindowSize: wnd,
+	})
+	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, header.TCPMinHeaderSize)
+	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
+}
+
 // sendRSTSegment sends a RST from a connection context with a specific SeqNum.
 func (c *TCPConn) sendRSTSegment(seqNum uint32) {
 	pb := packet.NewPacketBuffer(packet.MaxHeadroom)

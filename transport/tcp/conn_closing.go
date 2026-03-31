@@ -1,0 +1,90 @@
+package tcp
+
+import "github.com/Zwlin98/netstack/header"
+
+// handleFinWait1 processes segments in FIN_WAIT_1 state.
+// We have sent FIN and are waiting for ACK (→FIN_WAIT_2) or peer FIN (→TIME_WAIT).
+func (c *TCPConn) handleFinWait1(seg segment) {
+	ackOfFIN := false
+	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
+		c.snd.wnd = seg.wnd
+		c.snd.handleACK(seg.ack, c)
+		// Check if our FIN has been ACKed (ACK covers snd.nxt which is past the FIN).
+		if !c.snd.hasUnacked() {
+			ackOfFIN = true
+		}
+	}
+
+	// Accept data that arrives before peer's FIN.
+	if len(seg.payload) > 0 && c.rcv != nil {
+		c.rcv.handleData(seg.seq, seg.payload)
+	}
+
+	if seg.flags.Has(header.TCPFlagFIN) && c.rcv != nil {
+		c.rcv.nxt++
+		c.sendACK() // single ACK covers data + FIN
+		c.readBuf.CloseWrite()
+		if ackOfFIN {
+			c.enterTimeWait()
+		} else {
+			// Got peer's FIN but our FIN not yet ACKed.
+			c.enterTimeWait()
+		}
+		return
+	}
+
+	// ACK for data only (no FIN in this segment).
+	if len(seg.payload) > 0 {
+		c.sendACK()
+	}
+
+	if ackOfFIN {
+		c.state = stateFinWait2
+	}
+}
+
+// handleFinWait2 processes segments in FIN_WAIT_2 state.
+// Our FIN has been ACKed; we still accept data and wait for peer's FIN.
+func (c *TCPConn) handleFinWait2(seg segment) {
+	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
+		c.snd.wnd = seg.wnd
+	}
+
+	// Continue accepting data.
+	if len(seg.payload) > 0 && c.rcv != nil {
+		c.rcv.handleData(seg.seq, seg.payload)
+	}
+
+	if seg.flags.Has(header.TCPFlagFIN) && c.rcv != nil {
+		c.rcv.nxt++
+		c.sendACK() // single ACK covers data + FIN
+		c.enterTimeWait()
+		return
+	}
+
+	// ACK for data only.
+	if len(seg.payload) > 0 {
+		c.sendACK()
+	}
+}
+
+// handleLastAck processes segments in LAST_ACK state.
+// We sent FIN in response to peer's FIN; waiting for final ACK.
+func (c *TCPConn) handleLastAck(seg segment) {
+	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
+		// Check if our FIN is ACKed.
+		if !c.snd.hasUnacked() || seqGreaterThan(seg.ack, c.snd.una) {
+			c.snd.handleACK(seg.ack, c)
+			c.closeDone()
+		}
+	}
+}
+
+// handleTimeWait processes segments in TIME_WAIT state.
+// Re-ACK retransmitted FINs and reset the 2*MSL timer.
+func (c *TCPConn) handleTimeWait(seg segment) {
+	if seg.flags.Has(header.TCPFlagFIN) {
+		c.sendACK()
+		c.timeWaitTimer.Reset(timeWaitDuration)
+	}
+}
