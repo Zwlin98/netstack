@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source test/helpers.sh
 
-start_echo
+start_echo ${ECHO_EXTRA_ARGS:-}
 trap stop_echo EXIT
 
 if [ $# -gt 0 ]; then

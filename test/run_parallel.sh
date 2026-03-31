@@ -16,7 +16,7 @@ go build -o "$ECHO_BIN" ./example/
 if [ $# -gt 0 ]; then
     TESTS=("$@")
 else
-    TESTS=(test/04_packet_loss.sh test/07_reorder.sh test/08_duplicate.sh test/09_jitter.sh test/10_bandwidth.sh test/11_large_transfer.sh test/12_stress.sh test/13_combined.sh)
+    TESTS=(test/04_packet_loss.sh test/07_reorder.sh test/08_duplicate.sh test/09_jitter.sh test/10_bandwidth.sh test/11_large_transfer.sh test/12_stress.sh test/13_combined.sh test/15_conn_lifecycle.sh test/17_abrupt_disconnect.sh)
 fi
 
 PIDS=()
@@ -40,7 +40,7 @@ for t in "${TESTS[@]}"; do
         cd "$(dirname "$0")/.."
         source test/helpers.sh
 
-        start_echo
+        start_echo ${ECHO_EXTRA_ARGS:-}
         trap stop_echo EXIT
 
         source "$t"
