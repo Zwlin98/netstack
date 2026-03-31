@@ -6,6 +6,31 @@ import (
 	"github.com/Zwlin98/netstack/tcpip"
 )
 
+// segment holds pre-parsed fields from an incoming TCP segment.
+type segment struct {
+	flags   header.TCPFlags
+	seq     uint32
+	ack     uint32
+	wnd     uint16
+	payload []byte
+}
+
+func parseSeg(pb *packet.PacketBuffer) segment {
+	tcpHdr := header.TCP(pb.Data)
+	dataOffset := int(tcpHdr.DataOffset())
+	var payload []byte
+	if dataOffset < len(pb.Data) {
+		payload = pb.Data[dataOffset:]
+	}
+	return segment{
+		flags:   tcpHdr.Flags(),
+		seq:     tcpHdr.SequenceNumber(),
+		ack:     tcpHdr.AckNumber(),
+		wnd:     tcpHdr.WindowSize(),
+		payload: payload,
+	}
+}
+
 func setTCPChecksum(hdr header.TCP, src, dst tcpip.Address, tcpLen uint16) {
 	hdr.SetChecksum(0)
 	partial := header.PseudoHeaderChecksum(tcpip.TCPProtocolNumber, src, dst, tcpLen)
@@ -41,6 +66,23 @@ func (c *TCPConn) sendACK() {
 		DataOffset: header.TCPMinHeaderSize / 4,
 		Flags:      header.TCPFlagACK,
 		WindowSize: 65535,
+	})
+	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, header.TCPMinHeaderSize)
+	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
+}
+
+// sendRSTSegment sends a RST from a connection context with a specific SeqNum.
+func (c *TCPConn) sendRSTSegment(seqNum uint32) {
+	pb := packet.NewPacketBuffer(packet.MaxHeadroom)
+	tcpBuf := pb.Prepend(header.TCPMinHeaderSize)
+	hdr := header.TCP(tcpBuf)
+	hdr.Encode(&header.TCPFields{
+		SrcPort:    c.flow.DstPort,
+		DstPort:    c.flow.SrcPort,
+		SeqNum:     seqNum,
+		DataOffset: header.TCPMinHeaderSize / 4,
+		Flags:      header.TCPFlagRST,
+		WindowSize: 0,
 	})
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, header.TCPMinHeaderSize)
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)

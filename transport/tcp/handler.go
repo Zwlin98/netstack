@@ -1,3 +1,4 @@
+// Package tcp implements TCP handler for the netstack
 package tcp
 
 import (
@@ -65,8 +66,16 @@ func (h *TCPHandler) HandlePacket(pb *packet.PacketBuffer) {
 		return
 	}
 
-	if tcpHdr.Flags().Has(header.TCPFlagSYN) {
+	// Only a pure SYN (without ACK) initiates a new connection.
+	// SYN+ACK to a non-existent flow is invalid and falls through to sendRST.
+	if tcpHdr.Flags().Has(header.TCPFlagSYN) && !tcpHdr.Flags().Has(header.TCPFlagACK) {
 		h.handleSYN(pb, flow)
+		return
+	}
+
+	// Never send RST in response to RST (RFC 793).
+	if tcpHdr.Flags().Has(header.TCPFlagRST) {
+		pb.Release()
 		return
 	}
 
@@ -93,11 +102,9 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 
 	conn.sendSYNACK()
 
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
+	h.wg.Go(func() {
 		conn.run()
-	}()
+	})
 
 	pb.Release()
 }
@@ -120,9 +127,7 @@ func (h *TCPHandler) Close() error {
 	h.mu.Unlock()
 
 	for _, c := range conns {
-		c.closeOnce.Do(func() {
-			close(c.done)
-		})
+		c.Close()
 	}
 
 	h.wg.Wait()

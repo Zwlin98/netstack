@@ -31,12 +31,22 @@ func (c *TCPConn) OriginalDst() tcpip.FullAddress {
 	return tcpip.FullAddress{Addr: c.flow.DstAddr, Port: c.flow.DstPort}
 }
 
-// Close shuts down the connection.
+func (c *TCPConn) closeDone() {
+	c.closeOnce.Do(func() { close(c.done) })
+}
+
+// Close shuts down the connection, sending RST to the remote peer.
 func (c *TCPConn) Close() {
-	c.closeOnce.Do(func() {
-		close(c.done)
-	})
+	if c.state == stateEstablished {
+		c.sendRSTSegment(c.iss + 1)
+	}
+	c.closeDone()
 	c.handler.removeConn(c.flow)
+}
+
+func (c *TCPConn) handleRST() {
+	c.state = stateClosed
+	c.closeDone()
 }
 
 func (c *TCPConn) run() {
@@ -54,30 +64,30 @@ func (c *TCPConn) run() {
 }
 
 func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
-	tcpHdr := header.TCP(pb.Data)
-	flags := tcpHdr.Flags()
+	seg := parseSeg(pb)
+
+	// Common: RST handling applies to all states.
+	if seg.flags.Has(header.TCPFlagRST) {
+		c.handleRST()
+		return
+	}
+
+	// Common: unexpected SYN in non-SYN_RCVD state → challenge ACK.
+	if seg.flags.Has(header.TCPFlagSYN) && c.state != stateSynRcvd {
+		c.sendACK()
+		return
+	}
 
 	switch c.state {
 	case stateSynRcvd:
-		if flags.Has(header.TCPFlagACK) {
-			c.state = stateEstablished
-			select {
-			case c.handler.listener.acceptCh <- c:
-			case <-c.done:
-			}
-		}
-
+		c.handleSynRcvd(seg)
 	case stateEstablished:
-		if flags.Has(header.TCPFlagRST) {
-			c.state = stateClosed
-			c.closeOnce.Do(func() {
-				close(c.done)
-			})
-		}
+		c.handleEstablished(seg)
 	}
 }
 
 func (c *TCPConn) cleanup() {
+	c.handler.removeConn(c.flow)
 	for {
 		select {
 		case pb := <-c.inbound:
