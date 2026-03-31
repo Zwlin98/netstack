@@ -45,6 +45,15 @@ func (r *receiver) handleData(seq uint32, data []byte) {
 		return
 	}
 
+	// Discard data when read side is shut down.
+	if r.conn.readShutdown {
+		// Still advance sequence numbers so ACKs are correct.
+		if seq == r.nxt {
+			r.nxt += uint32(len(data))
+		}
+		return
+	}
+
 	if seq == r.nxt {
 		// In order: deliver to readBuf.
 		r.deliver(data)

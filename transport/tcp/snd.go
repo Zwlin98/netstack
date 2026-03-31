@@ -51,10 +51,18 @@ type sender struct {
 	recoveryPoint uint32 // SND.NXT at recovery entry; full ACK past this exits recovery
 }
 
-func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int) *sender {
+func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int, peerMSS uint16) *sender {
 	mss := mtu - header.IPv4MinHeaderSize - header.TCPMinHeaderSize
 	if mss <= 0 {
 		mss = 536 // RFC 879 default
+	}
+	// Negotiate MSS: use min(local_mss, peer_mss).
+	pmss := int(peerMSS)
+	if pmss == 0 {
+		pmss = 536 // RFC 879: default MSS when option absent
+	}
+	if pmss < mss {
+		mss = pmss
 	}
 	return &sender{
 		iss:        iss,
@@ -192,10 +200,13 @@ func (s *sender) handleRTO(conn *TCPConn) {
 		return
 	}
 
-	s.retries++
-	if s.retries > s.maxRetries {
-		conn.abort()
-		return
+	// Zero-window probes do not count toward max retransmission limit.
+	if !conn.zeroWindowProbing {
+		s.retries++
+		if s.retries > s.maxRetries {
+			conn.abort()
+			return
+		}
 	}
 
 	// Exit fast recovery if active.

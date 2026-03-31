@@ -23,8 +23,9 @@ func (c *TCPConn) handleSynRcvd(seg segment) {
 			return
 		}
 		c.state = stateEstablished
-		c.snd = newSender(c.iss, seg.wnd, c.sndWndScale, c.handler.stack.MTU())
+		c.snd = newSender(c.iss, seg.wnd, c.sndWndScale, c.handler.stack.MTU(), c.peerMSS)
 		c.rcv = newReceiver(c.irs, c.readBuf, c)
+		c.resetKeepalive()
 		select {
 		case c.handler.listener.acceptCh <- c:
 		case <-c.done:

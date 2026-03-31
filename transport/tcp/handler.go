@@ -117,6 +117,9 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 	// SACK: only enable if peer offered it.
 	conn.sackPermitted = synOpts.SACKPermit
 
+	// MSS: store peer's MSS from SYN.
+	conn.peerMSS = synOpts.MSS
+
 	h.mu.Lock()
 	h.conns[flow] = conn
 	h.mu.Unlock()
