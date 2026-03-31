@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/Zwlin98/netstack/header"
 	"github.com/Zwlin98/netstack/packet"
@@ -98,19 +99,59 @@ func (c *TCPConn) handleRST() {
 func (c *TCPConn) run() {
 	defer c.cleanup()
 
+	rtoTimer := time.NewTimer(0)
+	if !rtoTimer.Stop() {
+		<-rtoTimer.C
+	}
+	defer rtoTimer.Stop()
+
 	for {
 		select {
 		case pb := <-c.inbound:
 			c.handleSegment(pb)
 			pb.Release()
+			// After processing a segment, manage the RTO timer.
+			if c.snd != nil {
+				if c.snd.hasUnacked() {
+					rtoTimer.Reset(c.snd.rto)
+				} else {
+					if !rtoTimer.Stop() {
+						select {
+						case <-rtoTimer.C:
+						default:
+						}
+					}
+				}
+			}
+
+		case <-rtoTimer.C:
+			if c.snd != nil {
+				c.snd.handleRTO(c)
+				if c.state != stateClosed && c.snd.hasUnacked() {
+					rtoTimer.Reset(c.snd.rto)
+				}
+			}
+
 		case <-c.writeNotify:
 			if c.snd != nil {
 				c.snd.sendPending(c)
+				if c.snd.hasUnacked() {
+					rtoTimer.Reset(c.snd.rto)
+				}
 			}
+
 		case <-c.done:
 			return
 		}
 	}
+}
+
+// abort sends RST and closes the connection (used when max retries exceeded).
+func (c *TCPConn) abort() {
+	if c.snd != nil {
+		c.sendRSTSegment(c.snd.nxt)
+	}
+	c.closeDone()
 }
 
 func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {

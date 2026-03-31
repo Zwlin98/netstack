@@ -5,11 +5,15 @@ import "github.com/Zwlin98/netstack/header"
 // handleEstablished processes a segment in the ESTABLISHED state.
 // RST and unexpected SYN are handled by the common pipeline in handleSegment.
 func (c *TCPConn) handleEstablished(seg segment) {
-	// ACK processing: advance snd.una, update peer window, try to send more.
+	// ACK processing: update peer window, congestion control.
 	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
-		c.snd.handleACK(seg.ack)
+		oldWnd := c.snd.wnd
 		c.snd.wnd = seg.wnd
-		c.snd.sendPending(c) // peer window may have opened
+		c.snd.handleACK(seg.ack, c)
+		// A pure window update (same ACK, larger window) should trigger sending.
+		if seg.ack == c.snd.una && seg.wnd > oldWnd {
+			c.snd.sendPending(c)
+		}
 	}
 
 	// Data delivery.
