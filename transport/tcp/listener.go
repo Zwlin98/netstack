@@ -1,10 +1,6 @@
 package tcp
 
-import (
-	"net"
-
-	"github.com/Zwlin98/netstack/tcpip"
-)
+import "net"
 
 // TCPListener accepts new established TCP connections.
 type TCPListener struct {
@@ -13,16 +9,12 @@ type TCPListener struct {
 }
 
 // Accept blocks until a new ESTABLISHED connection is available.
-func (l *TCPListener) Accept() (*TCPConn, tcpip.FullAddress, error) {
+func (l *TCPListener) Accept() (*TCPConn, error) {
 	select {
 	case conn := <-l.acceptCh:
-		addr := tcpip.FullAddress{
-			Addr: conn.flow.SrcAddr,
-			Port: conn.flow.SrcPort,
-		}
-		return conn, addr, nil
+		return conn, nil
 	case <-l.done:
-		return nil, tcpip.FullAddress{}, net.ErrClosed
+		return nil, net.ErrClosed
 	}
 }
 

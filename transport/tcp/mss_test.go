@@ -41,7 +41,7 @@ func completeHandshakeWithMSS(t *testing.T, ch *channel.MemoryChannel, h *tcp.TC
 	done := make(chan struct{})
 	var acceptErr error
 	go func() {
-		conn, _, acceptErr = h.Listener().Accept()
+		conn, acceptErr = h.Listener().Accept()
 		close(done)
 	}()
 

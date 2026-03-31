@@ -284,7 +284,7 @@ func TestGracefulClose_NoGoroutineLeak(t *testing.T) {
 	// Accept.
 	done := make(chan *tcp.TCPConn, 1)
 	go func() {
-		conn, _, _ := h.Listener().Accept()
+		conn, _ := h.Listener().Accept()
 		done <- conn
 	}()
 

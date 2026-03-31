@@ -89,9 +89,14 @@ type TCPConn struct {
 	timeWaitTimer *time.Timer
 }
 
-// OriginalDst returns the original destination address of the connection.
-func (c *TCPConn) OriginalDst() tcpip.FullAddress {
+// LocalAddr returns the local (server-side) address of the connection.
+func (c *TCPConn) LocalAddr() tcpip.FullAddress {
 	return tcpip.FullAddress{Addr: c.flow.DstAddr, Port: c.flow.DstPort}
+}
+
+// RemoteAddr returns the remote (client-side) address of the connection.
+func (c *TCPConn) RemoteAddr() tcpip.FullAddress {
+	return tcpip.FullAddress{Addr: c.flow.SrcAddr, Port: c.flow.SrcPort}
 }
 
 func (c *TCPConn) closeDone() {

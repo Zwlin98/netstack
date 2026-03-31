@@ -214,7 +214,7 @@ func TestDataTransfer_WindowZeroPauseResume(t *testing.T) {
 	acceptDone := make(chan struct{})
 	var conn *tcp.TCPConn
 	go func() {
-		conn, _, _ = h.Listener().Accept()
+		conn, _ = h.Listener().Accept()
 		close(acceptDone)
 	}()
 	select {

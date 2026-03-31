@@ -161,11 +161,10 @@ func TestThreeWayHandshake(t *testing.T) {
 	// Step 4: Accept should return the connection.
 	done := make(chan struct{})
 	var conn *tcp.TCPConn
-	var acceptAddr tcpip.FullAddress
 	var acceptErr error
 
 	go func() {
-		conn, acceptAddr, acceptErr = h.Listener().Accept()
+		conn, acceptErr = h.Listener().Accept()
 		close(done)
 	}()
 
@@ -182,21 +181,22 @@ func TestThreeWayHandshake(t *testing.T) {
 		t.Fatal("Accept() returned nil connection")
 	}
 
-	// Verify OriginalDst.
-	origDst := conn.OriginalDst()
-	if origDst.Addr != serverAddr {
-		t.Errorf("OriginalDst addr = %s, want %s", origDst.Addr, serverAddr)
+	// Verify LocalAddr.
+	localAddr := conn.LocalAddr()
+	if localAddr.Addr != serverAddr {
+		t.Errorf("LocalAddr addr = %s, want %s", localAddr.Addr, serverAddr)
 	}
-	if origDst.Port != serverPort {
-		t.Errorf("OriginalDst port = %d, want %d", origDst.Port, serverPort)
+	if localAddr.Port != serverPort {
+		t.Errorf("LocalAddr port = %d, want %d", localAddr.Port, serverPort)
 	}
 
-	// Verify Accept returned client address.
-	if acceptAddr.Addr != clientAddr {
-		t.Errorf("Accept addr = %s, want %s", acceptAddr.Addr, clientAddr)
+	// Verify RemoteAddr returns client address.
+	remoteAddr := conn.RemoteAddr()
+	if remoteAddr.Addr != clientAddr {
+		t.Errorf("RemoteAddr addr = %s, want %s", remoteAddr.Addr, clientAddr)
 	}
-	if acceptAddr.Port != clientPort {
-		t.Errorf("Accept port = %d, want %d", acceptAddr.Port, clientPort)
+	if remoteAddr.Port != clientPort {
+		t.Errorf("RemoteAddr port = %d, want %d", remoteAddr.Port, clientPort)
 	}
 }
 
@@ -287,13 +287,12 @@ func TestMultipleConcurrentHandshakes(t *testing.T) {
 	// Start Accept() in background.
 	var mu sync.Mutex
 	accepted := make([]*tcp.TCPConn, 0, 3)
-	acceptAddrs := make([]tcpip.FullAddress, 0, 3)
 	var wg sync.WaitGroup
 	wg.Add(len(flows))
 
 	go func() {
 		for range flows {
-			conn, addr, err := h.Listener().Accept()
+			conn, err := h.Listener().Accept()
 			if err != nil {
 				t.Errorf("Accept() error: %v", err)
 				wg.Done()
@@ -301,7 +300,6 @@ func TestMultipleConcurrentHandshakes(t *testing.T) {
 			}
 			mu.Lock()
 			accepted = append(accepted, conn)
-			acceptAddrs = append(acceptAddrs, addr)
 			mu.Unlock()
 			wg.Done()
 		}
@@ -350,12 +348,12 @@ func TestMultipleConcurrentHandshakes(t *testing.T) {
 		t.Fatalf("expected 3 connections, got %d", len(accepted))
 	}
 
-	// Verify each connection has a unique OriginalDst.
+	// Verify each connection has a unique LocalAddr.
 	dstPorts := make(map[uint16]bool)
 	for _, conn := range accepted {
-		dst := conn.OriginalDst()
+		dst := conn.LocalAddr()
 		if dstPorts[dst.Port] {
-			t.Errorf("duplicate OriginalDst port: %d", dst.Port)
+			t.Errorf("duplicate LocalAddr port: %d", dst.Port)
 		}
 		dstPorts[dst.Port] = true
 	}
@@ -456,7 +454,7 @@ func TestRSTAbortsSynRcvd(t *testing.T) {
 	// Accept() should NOT return this connection. Close listener to unblock.
 	acceptDone := make(chan error, 1)
 	go func() {
-		_, _, err := h.Listener().Accept()
+		_, err := h.Listener().Accept()
 		acceptDone <- err
 	}()
 
@@ -583,7 +581,7 @@ func TestConnCloseIdempotent(t *testing.T) {
 
 	done := make(chan *tcp.TCPConn, 1)
 	go func() {
-		conn, _, _ := h.Listener().Accept()
+		conn, _ := h.Listener().Accept()
 		done <- conn
 	}()
 
@@ -623,7 +621,7 @@ func completeHandshake(t *testing.T, ch *channel.MemoryChannel, h *tcp.TCPHandle
 	done := make(chan struct{})
 	var acceptErr error
 	go func() {
-		conn, _, acceptErr = h.Listener().Accept()
+		conn, acceptErr = h.Listener().Accept()
 		close(done)
 	}()
 
@@ -696,7 +694,7 @@ func TestAcceptableAckInSynRcvd(t *testing.T) {
 				// Should be accepted — Accept() returns connection.
 				done := make(chan struct{})
 				go func() {
-					conn, _, err := h.Listener().Accept()
+					conn, err := h.Listener().Accept()
 					if err != nil {
 						t.Errorf("Accept() error: %v", err)
 					}
@@ -881,7 +879,7 @@ func TestSynRcvdBadSeqNumber(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		conn, _, err := h.Listener().Accept()
+		conn, err := h.Listener().Accept()
 		if err != nil {
 			t.Errorf("Accept() error: %v", err)
 		}
