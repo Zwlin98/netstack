@@ -32,6 +32,11 @@ func newRingBuffer(size int) *ringBuffer {
 	}
 }
 
+// Cap returns the total buffer capacity.
+func (rb *ringBuffer) Cap() int {
+	return len(rb.buf)
+}
+
 // Len returns the number of bytes available for reading.
 func (rb *ringBuffer) Len() int {
 	rb.mu.Lock()

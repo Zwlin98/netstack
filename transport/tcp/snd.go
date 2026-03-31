@@ -95,6 +95,11 @@ func (s *sender) sendPending(conn *TCPConn) {
 			break
 		}
 
+		// Nagle algorithm: hold sub-MSS writes while data is in flight.
+		if !conn.noDelay && s.hasUnacked() && available < s.mss {
+			break
+		}
+
 		segSize := min(min(windowLeft, available), s.mss)
 		data := make([]byte, segSize)
 		n := conn.writeBuf.ReadNoBlock(data)

@@ -29,8 +29,21 @@ func newReceiver(irs uint32, readBuf *ringBuffer, conn *TCPConn) *receiver {
 }
 
 // wnd returns the current receive window for the wire (scaled down by rcvWndScale).
+// Implements Clark's algorithm (RFC 1122 §4.2.3.3) for SWS avoidance:
+// advertise zero when free space is below min(MSS, bufCap/2).
 func (r *receiver) wnd() uint16 {
 	free := r.readBuf.Free()
+
+	// SWS avoidance: suppress small window advertisements.
+	mss := 536 // default
+	if r.conn.snd != nil {
+		mss = r.conn.snd.mss
+	}
+	threshold := min(mss, r.readBuf.Cap()/2)
+	if free < threshold {
+		return 0
+	}
+
 	scale := r.conn.rcvWndScale
 	scaled := free >> scale
 	if scaled > 0xFFFF {
