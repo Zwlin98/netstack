@@ -16,11 +16,13 @@ const (
 	TCPOptionWS            = 3
 	TCPOptionSACKPermitted = 4
 	TCPOptionSACK          = 5
+	TCPOptionTS            = 8
 
 	// TCP option lengths.
 	TCPOptionMSSLength           = 4
 	TCPOptionWSLength            = 3
 	TCPOptionSACKPermittedLength = 2
+	TCPOptionTSLength            = 10
 
 	// MaxWndScale is the maximum window scale shift (RFC 7323).
 	MaxWndScale = 14
@@ -207,11 +209,16 @@ type SynOptions struct {
 	MSS        uint16 // Maximum Segment Size (0 if not present)
 	WS         int    // Window Scale shift count (-1 if not present)
 	SACKPermit bool   // SACK Permitted
+	TSEnabled  bool   // Timestamp option present
+	TSVal      uint32 // Timestamp value from peer
 }
 
 // SegmentOptions holds options parsed from a regular (non-SYN) segment.
 type SegmentOptions struct {
 	SACKBlocks []SACKBlock
+	TSEnabled  bool   // Timestamp option present
+	TSVal      uint32 // Timestamp value from peer
+	TSecr      uint32 // Timestamp echo reply
 }
 
 // ParseSynOptions parses TCP options from a SYN or SYN+ACK segment.
@@ -246,6 +253,11 @@ func ParseSynOptions(opts []byte) SynOptions {
 			if optLen == TCPOptionSACKPermittedLength {
 				so.SACKPermit = true
 			}
+		case TCPOptionTS:
+			if optLen == TCPOptionTSLength {
+				so.TSEnabled = true
+				so.TSVal = binary.BigEndian.Uint32(opts[i+2:])
+			}
 		}
 		i += optLen
 	}
@@ -270,7 +282,8 @@ func ParseSegmentOptions(opts []byte) SegmentOptions {
 		if optLen < 2 || i+optLen > len(opts) {
 			return so
 		}
-		if opts[i] == TCPOptionSACK {
+		switch opts[i] {
+		case TCPOptionSACK:
 			payload := optLen - 2
 			if payload%8 == 0 {
 				numBlocks := min(payload/8, TCPMaxSACKBlocks)
@@ -282,6 +295,12 @@ func ParseSegmentOptions(opts []byte) SegmentOptions {
 						End:   binary.BigEndian.Uint32(opts[off+4:]),
 					}
 				}
+			}
+		case TCPOptionTS:
+			if optLen == TCPOptionTSLength {
+				so.TSEnabled = true
+				so.TSVal = binary.BigEndian.Uint32(opts[i+2:])
+				so.TSecr = binary.BigEndian.Uint32(opts[i+6:])
 			}
 		}
 		i += optLen
@@ -322,6 +341,21 @@ func EncodeSACKPermittedOption(buf []byte) int {
 	buf[0] = TCPOptionSACKPermitted
 	buf[1] = TCPOptionSACKPermittedLength
 	return TCPOptionSACKPermittedLength
+}
+
+// EncodeTimestampOption writes NOP+NOP+Timestamp option into buf (12 bytes total).
+// Returns the number of bytes written.
+func EncodeTimestampOption(buf []byte, tsval, tsecr uint32) int {
+	if len(buf) < 12 {
+		return 0
+	}
+	buf[0] = TCPOptionNOP
+	buf[1] = TCPOptionNOP
+	buf[2] = TCPOptionTS
+	buf[3] = TCPOptionTSLength
+	binary.BigEndian.PutUint32(buf[4:], tsval)
+	binary.BigEndian.PutUint32(buf[8:], tsecr)
+	return 12
 }
 
 // EncodeSACKBlocks writes SACK blocks into buf.

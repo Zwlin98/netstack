@@ -197,6 +197,132 @@ func TestTCPOptions_Accessor(t *testing.T) {
 	}
 }
 
+func TestParseSynOptions_Timestamp(t *testing.T) {
+	// MSS=1460 + Timestamp TSval=1000 TSecr=0
+	opts := []byte{
+		0x02, 0x04, 0x05, 0xB4, // MSS=1460
+		0x01, 0x01, // NOP, NOP
+		0x08, 0x0A, // kind=8, len=10
+		0x00, 0x00, 0x03, 0xE8, // TSval=1000
+		0x00, 0x00, 0x00, 0x00, // TSecr=0
+	}
+	so := header.ParseSynOptions(opts)
+	if so.MSS != 1460 {
+		t.Errorf("MSS = %d, want 1460", so.MSS)
+	}
+	if !so.TSEnabled {
+		t.Error("TSEnabled = false, want true")
+	}
+	if so.TSVal != 1000 {
+		t.Errorf("TSVal = %d, want 1000", so.TSVal)
+	}
+}
+
+func TestParseSynOptions_NoTimestamp(t *testing.T) {
+	opts := []byte{
+		0x02, 0x04, 0x05, 0xB4, // MSS=1460
+	}
+	so := header.ParseSynOptions(opts)
+	if so.TSEnabled {
+		t.Error("TSEnabled = true, want false")
+	}
+	if so.TSVal != 0 {
+		t.Errorf("TSVal = %d, want 0", so.TSVal)
+	}
+}
+
+func TestParseSegmentOptions_Timestamp(t *testing.T) {
+	opts := []byte{
+		0x01, 0x01, // NOP, NOP
+		0x08, 0x0A, // kind=8, len=10
+		0x00, 0x00, 0x13, 0x88, // TSval=5000
+		0x00, 0x00, 0x11, 0x94, // TSecr=4500
+	}
+	so := header.ParseSegmentOptions(opts)
+	if !so.TSEnabled {
+		t.Error("TSEnabled = false, want true")
+	}
+	if so.TSVal != 5000 {
+		t.Errorf("TSVal = %d, want 5000", so.TSVal)
+	}
+	if so.TSecr != 4500 {
+		t.Errorf("TSecr = %d, want 4500", so.TSecr)
+	}
+}
+
+func TestParseSegmentOptions_NoTimestamp(t *testing.T) {
+	so := header.ParseSegmentOptions(nil)
+	if so.TSEnabled {
+		t.Error("TSEnabled = true, want false")
+	}
+}
+
+func TestParseSegmentOptions_SACKAndTimestamp(t *testing.T) {
+	opts := []byte{
+		0x01, 0x01, // NOP, NOP
+		0x08, 0x0A, // kind=8, len=10
+		0x00, 0x00, 0x13, 0x88, // TSval=5000
+		0x00, 0x00, 0x11, 0x94, // TSecr=4500
+		header.TCPOptionSACK, 10, // kind=5, length=10 (1 block)
+		0x00, 0x00, 0x03, 0xE8, // start=1000
+		0x00, 0x00, 0x05, 0xDC, // end=1500
+	}
+	so := header.ParseSegmentOptions(opts)
+	if !so.TSEnabled {
+		t.Error("TSEnabled = false, want true")
+	}
+	if so.TSVal != 5000 {
+		t.Errorf("TSVal = %d, want 5000", so.TSVal)
+	}
+	if so.TSecr != 4500 {
+		t.Errorf("TSecr = %d, want 4500", so.TSecr)
+	}
+	if len(so.SACKBlocks) != 1 {
+		t.Fatalf("SACKBlocks count = %d, want 1", len(so.SACKBlocks))
+	}
+	if so.SACKBlocks[0].Start != 1000 || so.SACKBlocks[0].End != 1500 {
+		t.Errorf("block[0] = (%d,%d), want (1000,1500)", so.SACKBlocks[0].Start, so.SACKBlocks[0].End)
+	}
+}
+
+func TestEncodeTimestampOption(t *testing.T) {
+	buf := make([]byte, 12)
+	n := header.EncodeTimestampOption(buf, 1000, 500)
+	if n != 12 {
+		t.Fatalf("EncodeTimestampOption returned %d, want 12", n)
+	}
+	expected := []byte{0x01, 0x01, 0x08, 0x0A, 0x00, 0x00, 0x03, 0xE8, 0x00, 0x00, 0x01, 0xF4}
+	for i, b := range expected {
+		if buf[i] != b {
+			t.Errorf("buf[%d] = 0x%02X, want 0x%02X", i, buf[i], b)
+		}
+	}
+}
+
+func TestEncodeTimestampOption_Roundtrip(t *testing.T) {
+	buf := make([]byte, 12)
+	n := header.EncodeTimestampOption(buf, 12345, 6789)
+	if n != 12 {
+		t.Fatalf("EncodeTimestampOption returned %d, want 12", n)
+	}
+	so := header.ParseSegmentOptions(buf[:n])
+	if !so.TSEnabled {
+		t.Error("TSEnabled = false, want true")
+	}
+	if so.TSVal != 12345 {
+		t.Errorf("TSVal = %d, want 12345", so.TSVal)
+	}
+	if so.TSecr != 6789 {
+		t.Errorf("TSecr = %d, want 6789", so.TSecr)
+	}
+}
+
+func TestEncodeTimestampOption_BufferTooSmall(t *testing.T) {
+	if n := header.EncodeTimestampOption(make([]byte, 11), 0, 0); n != 0 {
+		t.Errorf("EncodeTimestampOption with small buf returned %d, want 0", n)
+	}
+}
+
 func TestTCPOptions_NoOptions(t *testing.T) {
 	buf := make([]byte, 20)
 	hdr := header.TCP(buf)
