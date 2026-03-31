@@ -85,15 +85,23 @@ func (h *TCPHandler) HandlePacket(pb *packet.PacketBuffer) {
 
 func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 	tcpHdr := header.TCP(pb.Data)
+	irs := tcpHdr.SequenceNumber()
+	iss := generateISN()
+
+	readBuf := newRingBuffer(defaultBufSize)
+	writeBuf := newRingBuffer(defaultBufSize)
 
 	conn := &TCPConn{
-		flow:    flow,
-		handler: h,
-		state:   stateSynRcvd,
-		irs:     tcpHdr.SequenceNumber(),
-		iss:     generateISN(),
-		inbound: make(chan *packet.PacketBuffer, 16),
-		done:    make(chan struct{}),
+		flow:        flow,
+		handler:     h,
+		state:       stateSynRcvd,
+		irs:         irs,
+		iss:         iss,
+		readBuf:     readBuf,
+		writeBuf:    writeBuf,
+		writeNotify: make(chan struct{}, 1),
+		inbound:     make(chan *packet.PacketBuffer, 16),
+		done:        make(chan struct{}),
 	}
 
 	h.mu.Lock()

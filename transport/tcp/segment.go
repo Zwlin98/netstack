@@ -55,19 +55,53 @@ func (c *TCPConn) sendSYNACK() {
 }
 
 func (c *TCPConn) sendACK() {
+	seqNum := c.iss + 1
+	ackNum := c.irs + 1
+	wnd := uint16(rcvWndSize)
+
+	if c.snd != nil {
+		seqNum = c.snd.nxt
+	}
+	if c.rcv != nil {
+		ackNum = c.rcv.nxt
+		wnd = c.rcv.wnd()
+	}
+
 	pb := packet.NewPacketBuffer(packet.MaxHeadroom)
 	tcpBuf := pb.Prepend(header.TCPMinHeaderSize)
 	hdr := header.TCP(tcpBuf)
 	hdr.Encode(&header.TCPFields{
 		SrcPort:    c.flow.DstPort,
 		DstPort:    c.flow.SrcPort,
-		SeqNum:     c.iss + 1,
-		AckNum:     c.irs + 1,
+		SeqNum:     seqNum,
+		AckNum:     ackNum,
 		DataOffset: header.TCPMinHeaderSize / 4,
 		Flags:      header.TCPFlagACK,
-		WindowSize: 65535,
+		WindowSize: wnd,
 	})
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, header.TCPMinHeaderSize)
+	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
+}
+
+// sendData sends a data segment with the given payload and sequence number.
+func (c *TCPConn) sendData(data []byte, seq uint32) {
+	tcpLen := uint16(header.TCPMinHeaderSize + len(data))
+	pb := packet.NewPacketBuffer(packet.MaxHeadroom)
+	// Place payload in the data region first, then prepend TCP header.
+	// This keeps the header in headroom and payload after it, contiguous.
+	pb.AppendData(data)
+	hdr := header.TCP(pb.Prepend(header.TCPMinHeaderSize))
+	hdr.Encode(&header.TCPFields{
+		SrcPort:    c.flow.DstPort,
+		DstPort:    c.flow.SrcPort,
+		SeqNum:     seq,
+		AckNum:     c.rcv.nxt,
+		DataOffset: header.TCPMinHeaderSize / 4,
+		Flags:      header.TCPFlagACK,
+		WindowSize: c.rcv.wnd(),
+	})
+	// hdr[:tcpLen] spans both TCP header and payload (contiguous in buffer).
+	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, tcpLen)
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 }
 

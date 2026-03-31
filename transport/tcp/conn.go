@@ -3,6 +3,7 @@ package tcp
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"io"
 	"sync"
 
 	"github.com/Zwlin98/netstack/header"
@@ -20,6 +21,17 @@ type TCPConn struct {
 	iss uint32 // our initial sequence number
 	irs uint32 // peer's initial sequence number
 
+	// Sender / Receiver (initialized on transition to ESTABLISHED).
+	snd *sender
+	rcv *receiver
+
+	// User-facing buffers.
+	readBuf  *ringBuffer
+	writeBuf *ringBuffer
+
+	// Notify conn.run() that writeBuf has data.
+	writeNotify chan struct{}
+
 	inbound chan *packet.PacketBuffer
 
 	done      chan struct{}
@@ -32,16 +44,50 @@ func (c *TCPConn) OriginalDst() tcpip.FullAddress {
 }
 
 func (c *TCPConn) closeDone() {
-	c.closeOnce.Do(func() { close(c.done) })
+	c.closeOnce.Do(func() {
+		c.state = stateClosed
+		close(c.done)
+	})
+}
+
+// Read reads data from the connection. Blocks until data is available.
+// Returns io.EOF when the remote side has closed and all data has been read.
+func (c *TCPConn) Read(b []byte) (int, error) {
+	if c.readBuf == nil {
+		return 0, io.EOF
+	}
+	return c.readBuf.Read(b, c.done)
+}
+
+// Write writes data to the connection. Blocks until all data is written.
+func (c *TCPConn) Write(b []byte) (int, error) {
+	if c.writeBuf == nil {
+		return 0, errBufferClosed
+	}
+	n, err := c.writeBuf.Write(b, c.done)
+	if n > 0 {
+		// Wake up conn.run() to send data.
+		select {
+		case c.writeNotify <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
 }
 
 // Close shuts down the connection, sending RST to the remote peer.
 func (c *TCPConn) Close() {
-	if c.state == stateEstablished {
-		c.sendRSTSegment(c.iss + 1)
+	if c.state == stateEstablished && c.snd != nil {
+		c.sendRSTSegment(c.snd.nxt)
 	}
 	c.closeDone()
 	c.handler.removeConn(c.flow)
+}
+
+// ForceClose sends RST and tears down the connection immediately.
+func (c *TCPConn) ForceClose() error {
+	c.Close()
+	return nil
 }
 
 func (c *TCPConn) handleRST() {
@@ -57,6 +103,10 @@ func (c *TCPConn) run() {
 		case pb := <-c.inbound:
 			c.handleSegment(pb)
 			pb.Release()
+		case <-c.writeNotify:
+			if c.snd != nil {
+				c.snd.sendPending(c)
+			}
 		case <-c.done:
 			return
 		}

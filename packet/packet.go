@@ -81,6 +81,13 @@ func (pb *PacketBuffer) Buf() []byte {
 	return pb.buf[pb.headroom:]
 }
 
+// AppendData copies payload data into the buffer area after headroom.
+// Must be called before Prepend so headers and data are contiguous.
+func (pb *PacketBuffer) AppendData(data []byte) {
+	pb.Data = pb.buf[pb.headroom : pb.headroom+len(data)]
+	copy(pb.Data, data)
+}
+
 // Release returns the PacketBuffer to the pool.
 func (pb *PacketBuffer) Release() {
 	pb.NetworkHeader = nil

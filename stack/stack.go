@@ -55,6 +55,11 @@ func (s *Stack) Stop() {
 	s.wg.Wait()
 }
 
+// MTU returns the channel's maximum transmission unit.
+func (s *Stack) MTU() int {
+	return s.channel.MTU()
+}
+
 // SendPacket prepends an IPv4 header and enqueues the packet for sending.
 func (s *Stack) SendPacket(pb *packet.PacketBuffer, src, dst tcpip.Address, proto tcpip.TransportProtocolNumber) {
 	ipSlice := pb.Prepend(header.IPv4MinHeaderSize)
