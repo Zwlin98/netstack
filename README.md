@@ -65,10 +65,10 @@ func main() {
 	// 1. 创建 Channel（实际使用时替换为 TUN 设备）
 	ch := channel.NewMemory(1500)
 
-	// 2. 创建协议栈
+	// 2. 创建协议栈（可选配置）
 	s := stack.New(ch)
 
-	// 3. 注册传输层处理器
+	// 3. 注册传输层处理器（可选配置）
 	tcpHandler := tcp.NewTCPHandler(s)
 	udpHandler := udp.NewUDPHandler(s)
 	s.RegisterHandler(tcpip.TCPProtocolNumber, tcpHandler)
@@ -102,6 +102,46 @@ func handleConn(conn *tcp.TCPConn) {
 		conn.Write(buf[:n]) // echo
 	}
 }
+```
+
+### 自定义配置
+
+每层构造函数通过 Functional Options 注入配置，不传则使用 RFC 推荐的默认值：
+
+```go
+// Stack 层
+s := stack.New(ch,
+    stack.WithTTL(128),
+    stack.WithOutboundQueueSize(1024),
+)
+
+// TCP 层
+tcpHandler := tcp.NewTCPHandler(s,
+    // 缓冲区
+    tcp.WithReadBufferSize(512*1024),
+    tcp.WithWriteBufferSize(512*1024),
+    tcp.WithAcceptQueueSize(64),
+
+    // Keepalive
+    tcp.WithKeepaliveIdle(60*time.Second),
+    tcp.WithKeepaliveInterval(10*time.Second),
+    tcp.WithKeepaliveCount(3),
+
+    // 超时
+    tcp.WithFinWait2Timeout(30*time.Second),
+    tcp.WithSynRcvdTimeout(15*time.Second),
+    tcp.WithTimeWaitDuration(30*time.Second),
+
+    // 重传
+    tcp.WithMinRTO(100*time.Millisecond),
+    tcp.WithMaxRTO(30*time.Second),
+    tcp.WithMaxRetries(10),
+)
+
+// UDP 层
+udpHandler := udp.NewUDPHandler(s,
+    udp.WithInboundQueueSize(1024),
+)
 ```
 
 ### 接入 TUN 设备
@@ -150,9 +190,9 @@ go func() {
 | `header` | 零拷贝协议头视图：IPv4、TCP、UDP、ICMPv4 + 校验和 |
 | `packet` | `PacketBuffer` — 带 headroom 的包缓冲区，`sync.Pool` 复用 |
 | `channel` | `Channel` 接口 + `MemoryChannel`（内存实现，用于测试） |
-| `stack` | 协议栈核心：IPv4 解析、协议分发、ICMP、读写循环 |
-| `transport/tcp` | TCP 实现：`TCPHandler` / `TCPListener` / `TCPConn` |
-| `transport/udp` | UDP 数据报收发：`UDPHandler`（ReadFrom / WriteTo） |
+| `stack` | 协议栈核心：IPv4 解析、协议分发、ICMP、读写循环、`Config` + `Option` |
+| `transport/tcp` | TCP 实现：`TCPHandler` / `TCPListener` / `TCPConn`、`Config` + `Option` |
+| `transport/udp` | UDP 数据报收发：`UDPHandler`（ReadFrom / WriteTo）、`Config` + `Option` |
 
 ## TCP 状态机
 
