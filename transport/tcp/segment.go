@@ -133,6 +133,7 @@ func (c *TCPConn) sendACK() {
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 	c.updateTSLastAckSent()
+	c.lastWndZero = (wnd == 0)
 }
 
 // sendData sends a data segment with the given payload and sequence number.

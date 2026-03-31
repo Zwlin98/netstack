@@ -8,6 +8,7 @@ import (
 	"github.com/Zwlin98/netstack/header"
 	"github.com/Zwlin98/netstack/packet"
 	"github.com/Zwlin98/netstack/stack"
+	"github.com/Zwlin98/netstack/tcpip"
 )
 
 // TCPHandler implements stack.TransportHandler for TCP.
@@ -57,6 +58,14 @@ func (h *TCPHandler) HandlePacket(pb *packet.PacketBuffer) {
 
 	tcpHdr := header.TCP(pb.Data)
 	ipHdr := header.IPv4(pb.NetworkHeader)
+
+	// Verify TCP checksum (RFC 793 §3.1).
+	tcpLen := min(ipHdr.TotalLength()-uint16(ipHdr.HeaderLength()), uint16(len(pb.Data)))
+	partial := header.PseudoHeaderChecksum(tcpip.TCPProtocolNumber, ipHdr.SourceAddress(), ipHdr.DestinationAddress(), tcpLen)
+	if header.Checksum(pb.Data[:tcpLen], partial) != 0 {
+		pb.Release()
+		return
+	}
 
 	flow := FlowID{
 		SrcAddr: ipHdr.SourceAddress(),
@@ -114,8 +123,9 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 		iss:         iss,
 		readBuf:     readBuf,
 		writeBuf:    writeBuf,
-		writeNotify: make(chan struct{}, 1),
-		inbound:     make(chan *packet.PacketBuffer, 16),
+		writeNotify:  make(chan struct{}, 1),
+		windowNotify: make(chan struct{}, 1),
+		inbound:     make(chan *packet.PacketBuffer, 256),
 		done:        make(chan struct{}),
 		closeCh:     make(chan struct{}, 1),
 	}
