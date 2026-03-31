@@ -1,8 +1,8 @@
 package udp
 
 import (
+	"bytes"
 	"runtime"
-	"sync"
 	"testing"
 	"time"
 
@@ -48,161 +48,274 @@ func buildUDPPacket(src, dst tcpip.Address, srcPort, dstPort uint16, payload []b
 	return buf
 }
 
-func TestHandlerCreatesNATEntry(t *testing.T) {
+func setupStack() (*stack.Stack, *channel.MemoryChannel, *UDPHandler) {
 	ch := channel.NewMemory(1500)
 	s := stack.New(ch)
-
-	h := NewUDPHandler(s, WithCleanInterval(time.Second))
-	defer h.Close()
-
-	var mu sync.Mutex
-	var receivedFlow FlowID
-	callbackCalled := false
-
-	h.SetNewSessionCallback(func(flow FlowID) bool {
-		mu.Lock()
-		receivedFlow = flow
-		callbackCalled = true
-		mu.Unlock()
-		return true
-	})
-
+	h := NewUDPHandler(s)
 	s.RegisterHandler(tcpip.UDPProtocolNumber, h)
 	s.Start()
+	return s, ch, h
+}
+
+func TestReadFrom(t *testing.T) {
+	s, ch, h := setupStack()
 	defer s.Stop()
+	defer h.Close()
 
 	src := tcpip.From4(10, 0, 0, 1)
 	dst := tcpip.From4(8, 8, 8, 8)
-	pkt := buildUDPPacket(src, dst, 12345, 53, []byte("dns query"))
+	payload := []byte("hello udp")
+	pkt := buildUDPPacket(src, dst, 12345, 53, payload)
 	ch.Inject(pkt)
+
+	buf := make([]byte, 1500)
+	n, gotSrc, gotDst, err := h.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+
+	if !bytes.Equal(buf[:n], payload) {
+		t.Errorf("payload = %q, want %q", buf[:n], payload)
+	}
+	if gotSrc.Addr != src || gotSrc.Port != 12345 {
+		t.Errorf("src = %s:%d, want %s:12345", gotSrc.Addr, gotSrc.Port, src)
+	}
+	if gotDst.Addr != dst || gotDst.Port != 53 {
+		t.Errorf("dst = %s:%d, want %s:53", gotDst.Addr, gotDst.Port, dst)
+	}
+}
+
+func TestWriteTo(t *testing.T) {
+	s, ch, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
+	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
+	payload := []byte("dns response")
+
+	n, err := h.WriteTo(payload, src, dst)
+	if err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+	if n != len(payload) {
+		t.Errorf("WriteTo returned %d, want %d", n, len(payload))
+	}
+
+	// Read the packet from channel.
+	raw := ch.Read(time.Second)
+	if raw == nil {
+		t.Fatal("expected packet on channel")
+	}
+
+	// Validate IPv4 header.
+	ip := header.IPv4(raw)
+	if ip.SourceAddress() != src.Addr {
+		t.Errorf("IP src = %s, want %s", ip.SourceAddress(), src.Addr)
+	}
+	if ip.DestinationAddress() != dst.Addr {
+		t.Errorf("IP dst = %s, want %s", ip.DestinationAddress(), dst.Addr)
+	}
+
+	// Validate UDP header.
+	udpHdr := header.UDP(raw[ip.HeaderLength():])
+	if udpHdr.SourcePort() != src.Port {
+		t.Errorf("UDP src port = %d, want %d", udpHdr.SourcePort(), src.Port)
+	}
+	if udpHdr.DestinationPort() != dst.Port {
+		t.Errorf("UDP dst port = %d, want %d", udpHdr.DestinationPort(), dst.Port)
+	}
+
+	// Validate payload.
+	got := udpHdr.Payload()
+	if !bytes.Equal(got, payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+}
+
+func TestReadFromBlocksUntilPacket(t *testing.T) {
+	s, ch, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	done := make(chan struct{})
+	var n int
+	var err error
+	buf := make([]byte, 1500)
+
+	go func() {
+		n, _, _, err = h.ReadFrom(buf)
+		close(done)
+	}()
+
+	// Ensure ReadFrom is blocking.
+	select {
+	case <-done:
+		t.Fatal("ReadFrom should block when no data")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Inject a packet to unblock.
+	payload := []byte("wake up")
+	pkt := buildUDPPacket(tcpip.From4(10, 0, 0, 1), tcpip.From4(8, 8, 8, 8), 1000, 53, payload)
+	ch.Inject(pkt)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ReadFrom did not unblock after packet injection")
+	}
+
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	if !bytes.Equal(buf[:n], payload) {
+		t.Errorf("payload = %q, want %q", buf[:n], payload)
+	}
+}
+
+func TestReadFromUnblocksOnClose(t *testing.T) {
+	s, ch, _ := setupStack()
+	_ = ch
+	defer s.Stop()
+
+	h := NewUDPHandler(s)
+	errCh := make(chan error, 1)
+
+	go func() {
+		buf := make([]byte, 1500)
+		_, _, _, err := h.ReadFrom(buf)
+		errCh <- err
+	}()
+
+	// Let ReadFrom block.
+	time.Sleep(50 * time.Millisecond)
+	h.Close()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("ReadFrom should return error after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReadFrom did not unblock after Close")
+	}
+}
+
+func TestQueueBackpressure(t *testing.T) {
+	s, ch, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	src := tcpip.From4(10, 0, 0, 1)
+	dst := tcpip.From4(8, 8, 8, 8)
+
+	// Fill the queue beyond capacity.
+	for i := 0; i < inboundQueueSize+10; i++ {
+		pkt := buildUDPPacket(src, dst, uint16(1000+i), 53, []byte("x"))
+		ch.Inject(pkt)
+	}
 
 	// Wait for processing.
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
-	mu.Lock()
-	defer mu.Unlock()
+	// Should be able to drain exactly inboundQueueSize items.
+	count := 0
+	for {
+		buf := make([]byte, 1500)
+		done := make(chan struct{})
+		var err error
+		go func() {
+			_, _, _, err = h.ReadFrom(buf)
+			close(done)
+		}()
 
-	if !callbackCalled {
-		t.Fatal("onNewSession callback was not called")
+		select {
+		case <-done:
+			if err != nil {
+				break
+			}
+			count++
+		case <-time.After(100 * time.Millisecond):
+			goto out
+		}
 	}
-
-	if receivedFlow.SrcAddr != src {
-		t.Errorf("flow SrcAddr = %s, want %s", receivedFlow.SrcAddr, src)
-	}
-	if receivedFlow.SrcPort != 12345 {
-		t.Errorf("flow SrcPort = %d, want 12345", receivedFlow.SrcPort)
-	}
-	if receivedFlow.DstAddr != dst {
-		t.Errorf("flow DstAddr = %s, want %s", receivedFlow.DstAddr, dst)
-	}
-	if receivedFlow.DstPort != 53 {
-		t.Errorf("flow DstPort = %d, want 53", receivedFlow.DstPort)
-	}
-
-	// Verify NAT entry was created.
-	entry := h.nat.Lookup(receivedFlow)
-	if entry == nil {
-		t.Error("NAT entry should have been created")
+out:
+	if count != inboundQueueSize {
+		t.Errorf("drained %d datagrams, want %d", count, inboundQueueSize)
 	}
 }
 
-func TestHandlerRejectsFlow(t *testing.T) {
-	ch := channel.NewMemory(1500)
-	s := stack.New(ch)
-
-	h := NewUDPHandler(s, WithCleanInterval(time.Second))
-	defer h.Close()
-
-	h.SetNewSessionCallback(func(flow FlowID) bool {
-		return false // reject all
-	})
-
-	s.RegisterHandler(tcpip.UDPProtocolNumber, h)
-	s.Start()
+func TestWriteToAfterClose(t *testing.T) {
+	s, _, h := setupStack()
 	defer s.Stop()
 
-	src := tcpip.From4(10, 0, 0, 1)
-	dst := tcpip.From4(8, 8, 8, 8)
-	pkt := buildUDPPacket(src, dst, 12345, 53, []byte("rejected"))
-	ch.Inject(pkt)
+	h.Close()
 
-	time.Sleep(100 * time.Millisecond)
-
-	flow := FlowID{SrcAddr: src, SrcPort: 12345, DstAddr: dst, DstPort: 53}
-	if h.nat.Lookup(flow) != nil {
-		t.Error("NAT entry should NOT be created when callback rejects")
+	_, err := h.WriteTo([]byte("data"), tcpip.FullAddress{}, tcpip.FullAddress{})
+	if err == nil {
+		t.Fatal("WriteTo should return error after Close")
 	}
 }
 
-func TestHandlerReusesExistingEntry(t *testing.T) {
-	ch := channel.NewMemory(1500)
-	s := stack.New(ch)
-
-	h := NewUDPHandler(s, WithCleanInterval(time.Second))
-	defer h.Close()
-
-	callCount := 0
-	h.SetNewSessionCallback(func(flow FlowID) bool {
-		callCount++
-		return true
-	})
-
-	s.RegisterHandler(tcpip.UDPProtocolNumber, h)
-	s.Start()
-	defer s.Stop()
-
-	src := tcpip.From4(10, 0, 0, 1)
-	dst := tcpip.From4(8, 8, 8, 8)
-
-	// Send same flow twice.
-	pkt1 := buildUDPPacket(src, dst, 12345, 53, []byte("query1"))
-	pkt2 := buildUDPPacket(src, dst, 12345, 53, []byte("query2"))
-	ch.Inject(pkt1)
-	time.Sleep(50 * time.Millisecond)
-	ch.Inject(pkt2)
-	time.Sleep(100 * time.Millisecond)
-
-	if callCount != 1 {
-		t.Errorf("callback called %d times, want 1 (should reuse entry)", callCount)
-	}
-}
-
-func TestHandlerGoroutineLeak(t *testing.T) {
+func TestNoGoroutineLeak(t *testing.T) {
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)
 	before := runtime.NumGoroutine()
 
 	ch := channel.NewMemory(1500)
 	s := stack.New(ch)
-
-	h := NewUDPHandler(s, WithCleanInterval(50*time.Millisecond))
-
+	h := NewUDPHandler(s)
 	s.RegisterHandler(tcpip.UDPProtocolNumber, h)
 	s.Start()
 
-	// Create a NAT entry by injecting a packet.
+	// Inject a packet and read it.
 	src := tcpip.From4(10, 0, 0, 1)
 	dst := tcpip.From4(8, 8, 8, 8)
 	pkt := buildUDPPacket(src, dst, 12345, 53, []byte("test"))
 	ch.Inject(pkt)
-	time.Sleep(100 * time.Millisecond)
 
-	// Verify goroutines were spawned.
-	during := runtime.NumGoroutine()
-	if during <= before {
-		t.Error("expected goroutines to be spawned")
-	}
+	buf := make([]byte, 1500)
+	h.ReadFrom(buf)
 
 	// Shut down.
 	h.Close()
 	s.Stop()
 
-	// Wait for goroutines to exit.
 	time.Sleep(200 * time.Millisecond)
 	runtime.GC()
 
 	after := runtime.NumGoroutine()
 	if after > before+1 {
 		t.Errorf("goroutine leak: before=%d, after=%d", before, after)
+	}
+}
+
+func TestMultipleDatagrams(t *testing.T) {
+	s, ch, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	src := tcpip.From4(10, 0, 0, 1)
+	dst := tcpip.From4(8, 8, 8, 8)
+
+	payloads := []string{"first", "second", "third"}
+	for _, p := range payloads {
+		pkt := buildUDPPacket(src, dst, 12345, 53, []byte(p))
+		ch.Inject(pkt)
+	}
+
+	// Wait for all packets to be processed.
+	time.Sleep(100 * time.Millisecond)
+
+	for _, want := range payloads {
+		buf := make([]byte, 1500)
+		n, _, _, err := h.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("ReadFrom: %v", err)
+		}
+		if string(buf[:n]) != want {
+			t.Errorf("payload = %q, want %q", string(buf[:n]), want)
+		}
 	}
 }
