@@ -3,6 +3,7 @@ package tcp
 
 import (
 	"sync"
+	"time"
 
 	"github.com/Zwlin98/netstack/header"
 	"github.com/Zwlin98/netstack/packet"
@@ -17,6 +18,10 @@ type TCPHandler struct {
 	stack    *stack.Stack
 
 	wg sync.WaitGroup
+
+	// Timestamp clock (RFC 7323).
+	tsOffset uint32    // random offset to prevent leaking uptime
+	tsEpoch  time.Time // monotonic reference point
 }
 
 // NewTCPHandler creates a new TCPHandler.
@@ -27,8 +32,15 @@ func NewTCPHandler(s *stack.Stack) *TCPHandler {
 			acceptCh: make(chan *TCPConn, 16),
 			done:     make(chan struct{}),
 		},
-		stack: s,
+		stack:    s,
+		tsOffset: generateISN(), // random offset
+		tsEpoch:  time.Now(),
 	}
+}
+
+// now returns the current TSval for outgoing timestamps.
+func (h *TCPHandler) now() uint32 {
+	return uint32(time.Since(h.tsEpoch).Milliseconds()) + h.tsOffset
 }
 
 // Listener returns the TCPListener for accepting connections.
@@ -116,6 +128,13 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 
 	// SACK: only enable if peer offered it.
 	conn.sackPermitted = synOpts.SACKPermit
+
+	// Timestamps: only enable if peer offered it.
+	if synOpts.TSEnabled {
+		conn.tsEnabled = true
+		conn.tsRecent = synOpts.TSVal
+		conn.tsOffset = h.tsOffset
+	}
 
 	// MSS: store peer's MSS from SYN.
 	conn.peerMSS = synOpts.MSS

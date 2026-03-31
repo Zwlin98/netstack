@@ -24,7 +24,20 @@ func (c *TCPConn) handleSynRcvd(seg segment) {
 		}
 		c.state = stateEstablished
 		c.snd = newSender(c.iss, seg.wnd, c.sndWndScale, c.handler.stack.MTU(), c.peerMSS)
+		if c.tsEnabled {
+			c.snd.mss -= 12 // timestamp option overhead
+		}
 		c.rcv = newReceiver(c.irs, c.readBuf, c)
+
+		// Initialize timestamp state now that receiver exists.
+		if c.tsEnabled {
+			c.tsLastAckSent = c.rcv.nxt
+			// Update tsRecent from the handshake ACK's timestamp.
+			if seg.hasTS {
+				c.tsRecent = seg.tsVal
+			}
+		}
+
 		c.resetKeepalive()
 		select {
 		case c.handler.listener.acceptCh <- c:

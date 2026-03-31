@@ -14,6 +14,11 @@ type segment struct {
 	wnd     uint16
 	options []byte // raw TCP options bytes
 	payload []byte
+
+	// Timestamp fields (populated by handleSegment when tsEnabled).
+	tsVal  uint32
+	tsEcr  uint32
+	hasTS  bool
 }
 
 func parseSeg(pb *packet.PacketBuffer) segment {
@@ -40,8 +45,8 @@ func setTCPChecksum(hdr header.TCP, src, dst tcpip.Address, tcpLen uint16) {
 }
 
 func (c *TCPConn) sendSYNACK() {
-	// Build options: MSS + NOP + WS + SACK-Permitted (if negotiated).
-	var optBuf [12]byte
+	// Build options: MSS + NOP + WS + SACK-Permitted + Timestamp (if negotiated).
+	var optBuf [24]byte // max: 4(MSS) + 1(NOP) + 3(WS) + 2(SACK) + 12(TS) + padding = 24
 	optLen := 0
 	mss := uint16(c.handler.stack.MTU() - header.IPv4MinHeaderSize - header.TCPMinHeaderSize)
 	optLen += header.EncodeMSSOption(optBuf[optLen:], mss)
@@ -52,6 +57,9 @@ func (c *TCPConn) sendSYNACK() {
 	}
 	if c.sackPermitted {
 		optLen += header.EncodeSACKPermittedOption(optBuf[optLen:])
+	}
+	if c.tsEnabled {
+		optLen += header.EncodeTimestampOption(optBuf[optLen:], c.handler.now(), c.tsRecent)
 	}
 	// Pad to 4-byte alignment.
 	for optLen%4 != 0 {
@@ -90,17 +98,20 @@ func (c *TCPConn) sendACK() {
 		wnd = c.rcv.wnd()
 	}
 
-	// Build SACK option if applicable.
-	var optBuf [34]byte // max: 2 header + 3*8 blocks = 26, padded to 28
+	// Build options: Timestamp + SACK blocks.
+	var optBuf [46]byte // max: 12(TS) + 2+3*8 = 46
 	optLen := 0
+	if c.tsEnabled {
+		optLen += header.EncodeTimestampOption(optBuf[optLen:], c.handler.now(), c.tsRecent)
+	}
 	if c.sackPermitted && c.rcv != nil {
 		if blocks := c.rcv.sackBlocks(); len(blocks) > 0 {
-			optLen = header.EncodeSACKBlocks(optBuf[:], blocks)
-			for optLen%4 != 0 {
-				optBuf[optLen] = header.TCPOptionNOP
-				optLen++
-			}
+			optLen += header.EncodeSACKBlocks(optBuf[optLen:], blocks)
 		}
+	}
+	for optLen%4 != 0 {
+		optBuf[optLen] = header.TCPOptionNOP
+		optLen++
 	}
 
 	hdrSize := header.TCPMinHeaderSize + optLen
@@ -121,28 +132,38 @@ func (c *TCPConn) sendACK() {
 	}
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
+	c.updateTSLastAckSent()
 }
 
 // sendData sends a data segment with the given payload and sequence number.
 func (c *TCPConn) sendData(data []byte, seq uint32) {
-	tcpLen := uint16(header.TCPMinHeaderSize + len(data))
+	var optBuf [12]byte
+	optLen := 0
+	if c.tsEnabled {
+		optLen += header.EncodeTimestampOption(optBuf[optLen:], c.handler.now(), c.tsRecent)
+	}
+
+	hdrSize := header.TCPMinHeaderSize + optLen
+	tcpLen := uint16(hdrSize + len(data))
 	pb := packet.NewPacketBuffer(packet.MaxHeadroom)
-	// Place payload in the data region first, then prepend TCP header.
-	// This keeps the header in headroom and payload after it, contiguous.
 	pb.AppendData(data)
-	hdr := header.TCP(pb.Prepend(header.TCPMinHeaderSize))
+	tcpBuf := pb.Prepend(hdrSize)
+	hdr := header.TCP(tcpBuf)
 	hdr.Encode(&header.TCPFields{
 		SrcPort:    c.flow.DstPort,
 		DstPort:    c.flow.SrcPort,
 		SeqNum:     seq,
 		AckNum:     c.rcv.nxt,
-		DataOffset: header.TCPMinHeaderSize / 4,
+		DataOffset: uint8(hdrSize / 4),
 		Flags:      header.TCPFlagACK,
 		WindowSize: c.rcv.wnd(),
 	})
-	// hdr[:tcpLen] spans both TCP header and payload (contiguous in buffer).
+	if optLen > 0 {
+		copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
+	}
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, tcpLen)
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
+	c.updateTSLastAckSent()
 }
 
 // sendFINSegment sends a FIN+ACK segment with the given sequence number.
@@ -154,20 +175,31 @@ func (c *TCPConn) sendFINSegment(seq uint32) {
 		wnd = c.rcv.wnd()
 	}
 
+	var optBuf [12]byte
+	optLen := 0
+	if c.tsEnabled {
+		optLen += header.EncodeTimestampOption(optBuf[optLen:], c.handler.now(), c.tsRecent)
+	}
+
+	hdrSize := header.TCPMinHeaderSize + optLen
 	pb := packet.NewPacketBuffer(packet.MaxHeadroom)
-	tcpBuf := pb.Prepend(header.TCPMinHeaderSize)
+	tcpBuf := pb.Prepend(hdrSize)
 	hdr := header.TCP(tcpBuf)
 	hdr.Encode(&header.TCPFields{
 		SrcPort:    c.flow.DstPort,
 		DstPort:    c.flow.SrcPort,
 		SeqNum:     seq,
 		AckNum:     ackNum,
-		DataOffset: header.TCPMinHeaderSize / 4,
+		DataOffset: uint8(hdrSize / 4),
 		Flags:      header.TCPFlagFIN | header.TCPFlagACK,
 		WindowSize: wnd,
 	})
-	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, header.TCPMinHeaderSize)
+	if optLen > 0 {
+		copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
+	}
+	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
+	c.updateTSLastAckSent()
 }
 
 // sendRSTSegment sends a RST from a connection context with a specific SeqNum.

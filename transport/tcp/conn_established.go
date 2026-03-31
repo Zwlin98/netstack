@@ -13,6 +13,9 @@ func (c *TCPConn) handleEstablished(seg segment) {
 		oldWnd := c.snd.wnd
 		c.snd.wnd = uint32(seg.wnd) << c.sndWndScale
 
+		// RTTM: measure RTT from timestamp echo (RFC 7323 §4).
+		c.measureRTTM(seg)
+
 		// Process SACK blocks if negotiated.
 		if c.sackPermitted && len(seg.options) > 0 {
 			so := header.ParseSegmentOptions(seg.options)

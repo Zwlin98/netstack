@@ -1,6 +1,20 @@
 package tcp
 
-import "github.com/Zwlin98/netstack/header"
+import (
+	"time"
+
+	"github.com/Zwlin98/netstack/header"
+)
+
+// measureRTTM measures RTT from timestamp echo if timestamps are enabled.
+func (c *TCPConn) measureRTTM(seg segment) {
+	if c.tsEnabled && seg.hasTS && seg.tsEcr != 0 && c.snd != nil {
+		rtt := time.Duration(c.handler.now()-seg.tsEcr) * time.Millisecond
+		if rtt > 0 {
+			c.snd.updateRTT(rtt)
+		}
+	}
+}
 
 // handleFinWait1 processes segments in FIN_WAIT_1 state.
 // We have sent FIN and are waiting for ACK (→FIN_WAIT_2) or peer FIN (→TIME_WAIT).
@@ -8,6 +22,7 @@ func (c *TCPConn) handleFinWait1(seg segment) {
 	ackOfFIN := false
 	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
 		c.snd.wnd = uint32(seg.wnd) << c.sndWndScale
+		c.measureRTTM(seg)
 		c.snd.handleACK(seg.ack, c)
 		// Check if our FIN has been ACKed (ACK covers snd.nxt which is past the FIN).
 		if !c.snd.hasUnacked() {

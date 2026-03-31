@@ -47,6 +47,15 @@ type TCPConn struct {
 	// MSS negotiation.
 	peerMSS uint16 // peer's MSS from SYN (0 if absent → default 536)
 
+	// TCP Timestamps (RFC 7323).
+	tsEnabled     bool   // timestamps negotiated
+	tsRecent      uint32 // TS.Recent: last valid TSval from peer (for TSecr echo)
+	tsLastAckSent uint32 // Last.ACK.sent: RCV.NXT when tsRecent was last updated
+	tsOffset      uint32 // random offset added to our TSval
+
+	// Nagle algorithm (RFC 1122 §4.2.3.4).
+	noDelay bool // when true, Nagle is disabled (TCP_NODELAY)
+
 	// Delayed ACK (RFC 1122 Section 4.2.3.2).
 	delayedACKTimer *time.Timer // fires after 200ms to send pending ACK
 	unackedSegs     int         // data segments received since last ACK sent
@@ -87,6 +96,12 @@ type TCPConn struct {
 
 	// TIME_WAIT timer, managed within run loop.
 	timeWaitTimer *time.Timer
+}
+
+// SetNoDelay enables or disables the Nagle algorithm.
+// When true, small writes are sent immediately regardless of in-flight data.
+func (c *TCPConn) SetNoDelay(noDelay bool) {
+	c.noDelay = noDelay
 }
 
 // LocalAddr returns the local (server-side) address of the connection.
@@ -182,6 +197,14 @@ func (c *TCPConn) sendFIN() {
 	c.snd.nxt++ // FIN occupies one sequence number
 }
 
+// updateTSLastAckSent records RCV.NXT at the time we send an ACK,
+// for the TS.Recent update rule (RFC 7323 §4.3).
+func (c *TCPConn) updateTSLastAckSent() {
+	if c.tsEnabled && c.rcv != nil {
+		c.tsLastAckSent = c.rcv.nxt
+	}
+}
+
 // cancelDelayedACK stops the delayed ACK timer if running.
 func (c *TCPConn) cancelDelayedACK() {
 	if c.delayedACKTimer != nil {
@@ -244,20 +267,32 @@ func (c *TCPConn) sendKeepaliveProbe() {
 	if c.snd == nil || c.rcv == nil {
 		return
 	}
+
+	var optBuf [12]byte
+	optLen := 0
+	if c.tsEnabled {
+		optLen += header.EncodeTimestampOption(optBuf[optLen:], c.handler.now(), c.tsRecent)
+	}
+
+	hdrSize := header.TCPMinHeaderSize + optLen
 	pb := packet.NewPacketBuffer(packet.MaxHeadroom)
-	tcpBuf := pb.Prepend(header.TCPMinHeaderSize)
+	tcpBuf := pb.Prepend(hdrSize)
 	hdr := header.TCP(tcpBuf)
 	hdr.Encode(&header.TCPFields{
 		SrcPort:    c.flow.DstPort,
 		DstPort:    c.flow.SrcPort,
 		SeqNum:     c.snd.una - 1, // deliberate bad sequence to elicit ACK
 		AckNum:     c.rcv.nxt,
-		DataOffset: header.TCPMinHeaderSize / 4,
+		DataOffset: uint8(hdrSize / 4),
 		Flags:      header.TCPFlagACK,
 		WindowSize: c.rcv.wnd(),
 	})
-	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, header.TCPMinHeaderSize)
+	if optLen > 0 {
+		copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
+	}
+	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
+	c.updateTSLastAckSent()
 }
 
 // resetKeepalive resets the keepalive timer to the idle timeout and clears probes.
@@ -439,6 +474,24 @@ func (c *TCPConn) abort() {
 func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 	seg := parseSeg(pb)
 
+	// Parse timestamp option when timestamps are negotiated.
+	if c.tsEnabled && len(seg.options) > 0 {
+		so := header.ParseSegmentOptions(seg.options)
+		if so.TSEnabled {
+			seg.hasTS = true
+			seg.tsVal = so.TSVal
+			seg.tsEcr = so.TSecr
+		}
+	}
+
+	// PAWS check (RFC 7323 §5): drop segment with stale timestamp.
+	if c.tsEnabled && seg.hasTS && !seg.flags.Has(header.TCPFlagRST) {
+		if int32(seg.tsVal-c.tsRecent) < 0 {
+			// Stale timestamp — drop silently (no ACK).
+			return
+		}
+	}
+
 	// Common: RST handling applies to all states except TIME_WAIT.
 	// RFC 1337: Ignore RST in TIME_WAIT to prevent TIME-WAIT assassination.
 	if seg.flags.Has(header.TCPFlagRST) {
@@ -455,6 +508,14 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 		return
 	}
 
+	// TS.Recent update rule (RFC 7323 §4.3): update tsRecent only when
+	// the segment's seq is not ahead of what we've already acknowledged.
+	if c.tsEnabled && seg.hasTS && c.rcv != nil {
+		if !seqGreaterThan(seg.seq, c.tsLastAckSent) {
+			c.tsRecent = seg.tsVal
+		}
+	}
+
 	switch c.state {
 	case stateSynRcvd:
 		c.handleSynRcvd(seg)
@@ -468,6 +529,7 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 		// In CLOSE_WAIT, we still process ACKs for our data.
 		if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
 			c.snd.wnd = uint32(seg.wnd) << c.sndWndScale
+			c.measureRTTM(seg)
 			c.snd.handleACK(seg.ack, c)
 		}
 	case stateLastAck:

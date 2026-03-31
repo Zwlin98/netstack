@@ -137,9 +137,10 @@ func (s *sender) recordSent(seq uint32, data []byte) {
 	})
 }
 
-// removeAcked removes segments fully acknowledged by ack and measures RTT
-// from the first non-retransmitted acked segment (Karn's algorithm).
-func (s *sender) removeAcked(ack uint32) {
+// removeAcked removes segments fully acknowledged by ack and measures RTT.
+// When timestamps are enabled, RTT is measured from TSecr (bypasses Karn's).
+// Otherwise falls back to Karn's algorithm (first non-retransmitted segment).
+func (s *sender) removeAcked(ack uint32, conn *TCPConn) {
 	rttMeasured := false
 	i := 0
 	for i < len(s.unacked) {
@@ -151,8 +152,9 @@ func (s *sender) removeAcked(ack uint32) {
 		if !seqGreaterThan(ack, seg.seq) {
 			break
 		}
-		// Measure RTT from the first non-retransmitted segment (Karn's algorithm).
-		if !rttMeasured && !seg.retransmitted {
+		// Karn's algorithm: measure RTT from the first non-retransmitted segment.
+		// Skipped when timestamps are enabled (RTTM from TSecr is used instead).
+		if !rttMeasured && !conn.tsEnabled && !seg.retransmitted {
 			s.updateRTT(time.Since(seg.sentAt))
 			rttMeasured = true
 		}
@@ -303,7 +305,7 @@ func (s *sender) handleACK(ack uint32, conn *TCPConn) {
 	s.una = ack
 	s.retries = 0
 
-	s.removeAcked(ack)
+	s.removeAcked(ack, conn)
 
 	if s.inRecovery {
 		if seqLessThan(ack, s.recoveryPoint) {
