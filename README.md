@@ -6,9 +6,12 @@
 
 - **IPv4** — 头部解析/构建、校验和验证
 - **TCP** — 服务端全状态机：三次握手、数据传输、优雅关闭
-  - TCP 选项：MSS、窗口缩放 (RFC 7323)、SACK (RFC 2018)
+  - TCP 选项：MSS、窗口缩放 (RFC 7323)、SACK (RFC 2018)、Timestamps (RFC 7323)
   - 拥塞控制：New Reno 快速恢复 (RFC 5681)
-  - 可靠重传：RTO 定时器、最大重试限制
+  - 可靠重传：RTO 定时器、最大重试限制、RTTM 时间戳测量
+  - Nagle 算法 (RFC 1122)、`SetNoDelay` 禁用
+  - 接收端 SWS 避免 (Clark's algorithm, RFC 1122)
+  - PAWS 防回绕序列号保护 (RFC 7323)
 - **UDP** — PacketConn 风格 API（ReadFrom / WriteTo），上层自由处理数据
 - **ICMP** — 自动 Echo Reply（ping 响应）
 - 零拷贝包缓冲区 + `sync.Pool` 对象复用
@@ -77,17 +80,18 @@ func main() {
 
 	// 5. 接受 TCP 连接
 	for {
-		conn, addr, err := tcpHandler.Listener().Accept()
+		conn, err := tcpHandler.Listener().Accept()
 		if err != nil {
 			break
 		}
-		go handleConn(conn, addr)
+		go handleConn(conn)
 	}
 }
 
-func handleConn(conn *tcp.TCPConn, addr tcpip.FullAddress) {
+func handleConn(conn *tcp.TCPConn) {
 	defer conn.Close()
-	fmt.Printf("新连接: %s:%d\n", addr.Addr, addr.Port)
+	remote := conn.RemoteAddr()
+	fmt.Printf("新连接: %s:%d\n", remote.Addr, remote.Port)
 
 	buf := make([]byte, 4096)
 	for {
