@@ -1,19 +1,26 @@
 # netstack
 
-纯 Go 实现的用户态 IPv4 网络协议栈，专为 TUN 网关场景设计。
+纯 Go 实现的用户态 IPv4 网络协议栈，专为网关场景设计。
 
 ## 特性
 
 - **IPv4** — 头部解析/构建、校验和验证
-- **TCP** — 服务端全状态机：三次握手、数据传输、优雅关闭
-  - TCP 选项：MSS、窗口缩放 (RFC 7323)、SACK (RFC 2018)、Timestamps (RFC 7323)
-  - 拥塞控制：New Reno 快速恢复 (RFC 5681)
-  - 可靠重传：RTO 定时器、最大重试限制、RTTM 时间戳测量
-  - Nagle 算法 (RFC 1122)、`SetNoDelay` 禁用
-  - 接收端 SWS 避免 (Clark's algorithm, RFC 1122)
+- **TCP** — 服务端全状态机：三次握手、数据传输、半关闭、优雅关闭
+  - TCP 选项：MSS 协商、窗口缩放 (RFC 7323)、SACK (RFC 2018)、DSACK (RFC 2883)、Timestamps (RFC 7323)
+  - 拥塞控制：New Reno 快速恢复 (RFC 5681)、Limited Transmit (RFC 3042)
+  - 可靠重传：RTO 定时器 (RFC 6298)、Karn 算法、SACK 驱动丢包检测、最大重试限制
+  - RTT 测量：时间戳 RTTM (RFC 7323)、SRTT/RTTVAR 平滑
   - PAWS 防回绕序列号保护 (RFC 7323)
+  - Nagle 算法 (RFC 1122)、`SetNoDelay` 禁用
+  - Delayed ACK (RFC 1122)：200ms 延迟确认
+  - SWS 避免：接收端 Clark's algorithm + 发送端抑制 (RFC 1122 §4.2.3.4)
+  - 零窗口探测 (RFC 1122)
+  - 接收缓冲区自动调优：按 RTT 窗口测量吞吐量，动态扩容至配置上限
+  - Keepalive (RFC 1122 §4.2.3.6)：可配置 idle/interval/count
+  - 超时管理：SYN_RCVD、FIN_WAIT_2、TIME_WAIT (2×MSL)
 - **UDP** — PacketConn 风格 API（ReadFrom / WriteTo），上层自由处理数据
 - **ICMP** — 自动 Echo Reply（ping 响应）
+- **TUN** — 内置 Linux TUN 设备驱动，支持 GRO 合并和校验和卸载
 - 零拷贝包缓冲区 + `sync.Pool` 对象复用
 
 ## 架构
@@ -120,6 +127,7 @@ tcpHandler := tcp.NewTCPHandler(s,
     // 缓冲区
     tcp.WithReadBufferSize(512*1024),
     tcp.WithWriteBufferSize(512*1024),
+    tcp.WithMaxReadBufferSize(8*1024*1024), // 接收缓冲区自动调优上限
     tcp.WithAcceptQueueSize(64),
 
     // Keepalive
@@ -131,6 +139,7 @@ tcpHandler := tcp.NewTCPHandler(s,
     tcp.WithFinWait2Timeout(30*time.Second),
     tcp.WithSynRcvdTimeout(15*time.Second),
     tcp.WithTimeWaitDuration(30*time.Second),
+    tcp.WithDelayedACKTimeout(100*time.Millisecond),
 
     // 重传
     tcp.WithMinRTO(100*time.Millisecond),
@@ -173,7 +182,7 @@ type Channel interface {
 
 ### UDP 数据报收发
 
-UDP handler 提供 `net.PacketConn` 风格的 API，上层自行决定如何处理数据（NAT 转发、DNS 劫持、过滤等）：
+UDP handler 提供 `net.PacketConn` 风格的 API，上层自行决定如何处理数据（NAT 转发、过滤等）：
 
 ```go
 udpHandler := udp.NewUDPHandler(s)
@@ -204,6 +213,7 @@ go func() {
 | `header` | 零拷贝协议头视图：IPv4、TCP、UDP、ICMPv4 + 校验和 |
 | `packet` | `PacketBuffer` — 带 headroom 的包缓冲区，`sync.Pool` 复用 |
 | `channel` | `Channel` 接口 + `MemoryChannel`（内存实现，用于测试） |
+| `channel/tun` | Linux TUN 设备驱动，支持 GRO/校验和卸载 |
 | `stack` | 协议栈核心：IPv4 解析、协议分发、ICMP、读写循环、`Config` + `Option` |
 | `transport/tcp` | TCP 实现：`TCPHandler` / `TCPListener` / `TCPConn`、`Config` + `Option` |
 | `transport/udp` | UDP 数据报收发：`UDPHandler`（ReadFrom / WriteTo）、`Config` + `Option` |
