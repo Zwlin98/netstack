@@ -95,3 +95,21 @@ func ReadBufCap(c *TCPConn) int {
 func NewRingBufferExported(size int) *ringBuffer {
 	return newRingBuffer(size)
 }
+
+// WriteBufCap returns the write buffer capacity for testing.
+func WriteBufCap(c *TCPConn) int {
+	if c.writeBuf != nil {
+		return c.writeBuf.Cap()
+	}
+	return 0
+}
+
+// ConnReadBufSize returns the target readBufSize for testing.
+func ConnReadBufSize(c *TCPConn) int {
+	return c.readBufSize
+}
+
+// ConnWriteBufSize returns the target writeBufSize for testing.
+func ConnWriteBufSize(c *TCPConn) int {
+	return c.writeBufSize
+}

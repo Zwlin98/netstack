@@ -110,6 +110,8 @@ type TCPConn struct {
 	maxRetries        int
 	initialSSThresh   uint32
 	maxReadBufSize    int
+	readBufSize       int // target ReadBufferSize for lazy growth
+	writeBufSize      int // target WriteBufferSize for lazy growth
 }
 
 // SetNoDelay enables or disables the Nagle algorithm.
@@ -161,6 +163,10 @@ func (c *TCPConn) Write(b []byte) (int, error) {
 	}
 	if c.writeBuf == nil {
 		return 0, errBufferClosed
+	}
+	// Lazy allocation: grow writeBuf to target size on first write.
+	if c.writeBufSize > 0 && c.writeBuf.Cap() < c.writeBufSize {
+		c.writeBuf.Grow(c.writeBufSize)
 	}
 	n, err := c.writeBuf.Write(b, c.done)
 	if n > 0 {

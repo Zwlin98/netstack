@@ -36,7 +36,7 @@ func (c *TCPConn) handleSynRcvd(seg segment) {
 		if c.tsEnabled {
 			c.snd.mss -= 12 // timestamp option overhead
 		}
-		c.rcv = newReceiver(c.irs, c.readBuf, c, c.maxReadBufSize)
+		c.rcv = newReceiver(c.irs, c.readBuf, c, c.readBufSize, c.maxReadBufSize)
 
 		// Initialize timestamp state now that receiver exists.
 		if c.tsEnabled {

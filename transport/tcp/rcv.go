@@ -30,7 +30,8 @@ type receiver struct {
 	autoTune struct {
 		measureStart   time.Time // when current measurement window began
 		bytesDelivered int       // bytes delivered in current window
-		maxBufSize     int       // maximum buffer capacity (config limit)
+		readBufSize    int       // phase-1 ceiling (ReadBufferSize)
+		maxBufSize     int       // phase-2 ceiling (MaxReadBufferSize)
 	}
 }
 
@@ -39,15 +40,17 @@ type oooSegment struct {
 	data []byte
 }
 
-func newReceiver(irs uint32, readBuf *ringBuffer, conn *TCPConn, maxBufSize int) *receiver {
+func newReceiver(irs uint32, readBuf *ringBuffer, conn *TCPConn, readBufSize, maxBufSize int) *receiver {
 	r := &receiver{
 		irs:     irs,
 		nxt:     irs + 1, // SYN consumed one sequence number
 		readBuf: readBuf,
 		conn:    conn,
 	}
-	// Enable auto-tuning if maxBufSize > initial capacity.
-	if maxBufSize > readBuf.Cap() {
+	// Enable auto-tuning if buffer can grow beyond initial capacity.
+	cap := readBuf.Cap()
+	if readBufSize > cap || maxBufSize > cap {
+		r.autoTune.readBufSize = readBufSize
 		r.autoTune.maxBufSize = maxBufSize
 	}
 	return r
@@ -160,7 +163,7 @@ func (r *receiver) deliver(data []byte) int {
 // autoTuneAccumulate tracks delivered bytes and triggers buffer growth checks
 // when one SRTT measurement window completes.
 func (r *receiver) autoTuneAccumulate(n int) {
-	if r.autoTune.maxBufSize <= 0 {
+	if r.autoTune.maxBufSize <= 0 && r.autoTune.readBufSize <= 0 {
 		return // auto-tuning disabled
 	}
 
@@ -192,14 +195,28 @@ func (r *receiver) senderSRTT() time.Duration {
 }
 
 // autoTuneCheck evaluates whether to grow the receive buffer based on throughput.
-// If throughput per RTT > 50% of buffer capacity, double the buffer.
+//
+// Phase 1 (curCap < readBufSize): aggressive — double on any positive delivery.
+// Phase 2 (curCap >= readBufSize): standard — double only when throughput > 50% of capacity.
 func (r *receiver) autoTuneCheck() {
 	curCap := r.readBuf.Cap()
-	threshold := curCap / 2
 
-	if r.autoTune.bytesDelivered > threshold && curCap < r.autoTune.maxBufSize {
-		newCap := min(curCap*2, r.autoTune.maxBufSize)
-		r.readBuf.Grow(newCap)
+	// Determine ceiling for this phase.
+	ceiling := r.autoTune.maxBufSize
+	if r.autoTune.readBufSize > 0 && curCap < r.autoTune.readBufSize {
+		// Phase 1: grow aggressively up to readBufSize.
+		ceiling = r.autoTune.readBufSize
+		if r.autoTune.bytesDelivered > 0 && curCap < ceiling {
+			newCap := min(curCap*2, ceiling)
+			r.readBuf.Grow(newCap)
+		}
+	} else {
+		// Phase 2: standard 50% utilization threshold.
+		threshold := curCap / 2
+		if r.autoTune.bytesDelivered > threshold && curCap < ceiling {
+			newCap := min(curCap*2, ceiling)
+			r.readBuf.Grow(newCap)
+		}
 	}
 
 	// Reset measurement window.

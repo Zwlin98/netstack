@@ -8,6 +8,11 @@ type Config struct {
 	ReadBufferSize  int
 	WriteBufferSize int
 
+	// Initial buffer sizes for lazy allocation. Buffers start small and
+	// grow to ReadBufferSize/WriteBufferSize on demand.
+	InitialReadBufferSize  int
+	InitialWriteBufferSize int
+
 	// Accept queue.
 	AcceptQueueSize int
 
@@ -45,6 +50,9 @@ type Config struct {
 var defaultConfig = Config{
 	ReadBufferSize:  256 * 1024,
 	WriteBufferSize: 256 * 1024,
+
+	InitialReadBufferSize:  32 * 1024,
+	InitialWriteBufferSize: 32 * 1024,
 
 	AcceptQueueSize:  16,
 	InboundQueueSize: 256,
@@ -96,4 +104,6 @@ func WithMaxRetries(n int) Option           { return func(c *Config) { c.MaxRetr
 
 func WithInitialSSThresh(n uint32) Option   { return func(c *Config) { c.InitialSSThresh = n } }
 func WithReceiveWindowSize(n uint16) Option { return func(c *Config) { c.ReceiveWindowSize = n } }
-func WithMaxReadBufferSize(n int) Option    { return func(c *Config) { c.MaxReadBufferSize = n } }
+func WithMaxReadBufferSize(n int) Option      { return func(c *Config) { c.MaxReadBufferSize = n } }
+func WithInitialReadBufferSize(n int) Option  { return func(c *Config) { c.InitialReadBufferSize = n } }
+func WithInitialWriteBufferSize(n int) Option { return func(c *Config) { c.InitialWriteBufferSize = n } }

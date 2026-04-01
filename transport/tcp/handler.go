@@ -32,6 +32,13 @@ func NewTCPHandler(s *stack.Stack, opts ...Option) *TCPHandler {
 	for _, o := range opts {
 		o(&cfg)
 	}
+	// Clamp initial buffer sizes to their target sizes.
+	if cfg.InitialReadBufferSize > cfg.ReadBufferSize {
+		cfg.InitialReadBufferSize = cfg.ReadBufferSize
+	}
+	if cfg.InitialWriteBufferSize > cfg.WriteBufferSize {
+		cfg.InitialWriteBufferSize = cfg.WriteBufferSize
+	}
 	return &TCPHandler{
 		conns: make(map[FlowID]*TCPConn),
 		listener: &TCPListener{
@@ -119,8 +126,8 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 	synOpts := header.ParseSynOptions(tcpHdr.Options())
 
 	cfg := &h.cfg
-	readBuf := newRingBuffer(cfg.ReadBufferSize)
-	writeBuf := newRingBuffer(cfg.WriteBufferSize)
+	readBuf := newRingBuffer(cfg.InitialReadBufferSize)
+	writeBuf := newRingBuffer(cfg.InitialWriteBufferSize)
 
 	conn := &TCPConn{
 		flow:        flow,
@@ -152,6 +159,8 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 		maxRetries:        cfg.MaxRetries,
 		initialSSThresh:   cfg.InitialSSThresh,
 		maxReadBufSize:    cfg.MaxReadBufferSize,
+		readBufSize:       cfg.ReadBufferSize,
+		writeBufSize:      cfg.WriteBufferSize,
 	}
 
 	// Window scaling: only enable if peer offered it.
