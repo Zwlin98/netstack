@@ -109,6 +109,7 @@ type TCPConn struct {
 	initialRTO        time.Duration
 	maxRetries        int
 	initialSSThresh   uint32
+	maxReadBufSize    int
 }
 
 // SetNoDelay enables or disables the Nagle algorithm.
@@ -647,6 +648,7 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 		// In CLOSE_WAIT, we still process ACKs for our data.
 		if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
 			c.snd.wnd = uint32(seg.wnd) << c.sndWndScale
+			c.snd.updateMaxWnd(c.snd.wnd)
 			c.measureRTTM(seg)
 			c.snd.handleACK(seg.ack, c)
 		}

@@ -42,6 +42,12 @@ type sender struct {
 	// NewReno fast recovery (RFC 5681 / RFC 6582).
 	inRecovery    bool   // currently in fast recovery
 	recoveryPoint uint32 // SND.NXT at recovery entry; full ACK past this exits recovery
+
+	// DSACK (RFC 2883): set when peer reports a duplicate segment.
+	dsackSeen bool
+
+	// Sender SWS avoidance (RFC 1122 §4.2.3.4).
+	maxWnd uint32 // maximum peer window ever advertised
 }
 
 func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int, peerMSS uint16, cfg senderConfig) *sender {
@@ -60,11 +66,12 @@ func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int, peerMSS uint
 	// Initial window per RFC 6928: IW = min(10*MSS, max(2*MSS, 14600)).
 	iw := min(10*uint32(mss), max(2*uint32(mss), 14600))
 
+	initialWnd := uint32(peerWnd) << wndScale
 	return &sender{
 		iss:        iss,
 		nxt:        iss + 1, // SYN consumed one sequence number
 		una:        iss + 1,
-		wnd:        uint32(peerWnd) << wndScale,
+		wnd:        initialWnd,
 		mss:        mss,
 		rto:        cfg.InitialRTO,
 		minRTO:     cfg.MinRTO,
@@ -72,6 +79,7 @@ func newSender(iss uint32, peerWnd uint16, wndScale uint8, mtu int, peerMSS uint
 		maxRetries: cfg.MaxRetries,
 		cwnd:       iw,
 		ssthresh:   cfg.InitialSSThresh,
+		maxWnd:     initialWnd,
 	}
 }
 
@@ -84,6 +92,13 @@ type senderConfig struct {
 	InitialSSThresh uint32
 }
 
+// updateMaxWnd tracks the maximum window ever advertised by the peer.
+func (s *sender) updateMaxWnd(wnd uint32) {
+	if wnd > s.maxWnd {
+		s.maxWnd = wnd
+	}
+}
+
 // effectiveWindow returns how many bytes the sender may still have in flight.
 func (s *sender) effectiveWindow() int {
 	flightSize := int(s.nxt - s.una)
@@ -91,6 +106,9 @@ func (s *sender) effectiveWindow() int {
 }
 
 // sendPending sends as many segments as the effective window allows.
+// Implements sender-side SWS avoidance (RFC 1122 §4.2.3.4):
+// suppress sending when the effective window is below min(MSS, maxWnd/2)
+// unless all remaining data fits in one segment.
 func (s *sender) sendPending(conn *TCPConn) {
 	for {
 		windowLeft := s.effectiveWindow()
@@ -100,6 +118,17 @@ func (s *sender) sendPending(conn *TCPConn) {
 		available := conn.writeBuf.Len()
 		if available <= 0 {
 			break
+		}
+
+		// Sender SWS avoidance (RFC 1122 §4.2.3.4): do not send when the
+		// effective window is smaller than min(MSS, maxWnd/2) unless all
+		// remaining data fits in a single segment.
+		// Zero-window probes bypass this check (handled separately).
+		if !conn.zeroWindowProbing {
+			swsThreshold := min(s.mss, int(s.maxWnd/2))
+			if windowLeft < swsThreshold && available > windowLeft {
+				break
+			}
 		}
 
 		// Nagle algorithm: hold sub-MSS writes while data is in flight.
@@ -244,7 +273,18 @@ func (s *sender) handleRTO(conn *TCPConn) {
 }
 
 // processSACKBlocks marks unacked segments covered by SACK blocks.
-func (s *sender) processSACKBlocks(blocks []header.SACKBlock) {
+// It also detects DSACK blocks (RFC 2883): a SACK block whose entire
+// range falls below the cumulative ACK indicates a spurious retransmission.
+func (s *sender) processSACKBlocks(blocks []header.SACKBlock, ack uint32) {
+	// DSACK detection: first block with End <= cumulative ACK is a DSACK.
+	if len(blocks) > 0 {
+		b := blocks[0]
+		if !seqGreaterThan(b.End, ack) {
+			s.dsackSeen = true
+			blocks = blocks[1:] // skip DSACK block for regular SACK processing
+		}
+	}
+
 	for i := range s.unacked {
 		seg := &s.unacked[i]
 		if seg.sacked {

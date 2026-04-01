@@ -37,6 +37,9 @@ type Config struct {
 
 	// Receive window advertised in SYN+ACK.
 	ReceiveWindowSize uint16
+
+	// Maximum receive buffer size for auto-tuning (0 = no auto-tuning).
+	MaxReadBufferSize int
 }
 
 var defaultConfig = Config{
@@ -64,6 +67,8 @@ var defaultConfig = Config{
 	InitialSSThresh: 65535,
 
 	ReceiveWindowSize: 65535,
+
+	MaxReadBufferSize: 4 * 1024 * 1024, // 4MB default
 }
 
 // Option configures a TCPHandler.
@@ -91,3 +96,4 @@ func WithMaxRetries(n int) Option           { return func(c *Config) { c.MaxRetr
 
 func WithInitialSSThresh(n uint32) Option   { return func(c *Config) { c.InitialSSThresh = n } }
 func WithReceiveWindowSize(n uint16) Option { return func(c *Config) { c.ReceiveWindowSize = n } }
+func WithMaxReadBufferSize(n int) Option    { return func(c *Config) { c.MaxReadBufferSize = n } }

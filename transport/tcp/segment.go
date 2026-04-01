@@ -99,7 +99,8 @@ func (c *TCPConn) sendACK() {
 	}
 
 	// Build options: Timestamp + SACK blocks.
-	var optBuf [46]byte // max: 12(TS) + 2+3*8 = 46
+	// Max: 12(TS) + 2+4*8(DSACK+3 regular) + 2(pad) = 48
+	var optBuf [48]byte
 	optLen := 0
 	if c.tsEnabled {
 		optLen += header.EncodeTimestampOption(optBuf[optLen:], c.handler.now(), c.tsRecent)

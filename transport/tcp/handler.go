@@ -151,12 +151,18 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 		initialRTO:        cfg.InitialRTO,
 		maxRetries:        cfg.MaxRetries,
 		initialSSThresh:   cfg.InitialSSThresh,
+		maxReadBufSize:    cfg.MaxReadBufferSize,
 	}
 
 	// Window scaling: only enable if peer offered it.
+	// Use max buffer size (not initial) so the window can grow with auto-tuning.
 	if synOpts.WS >= 0 {
 		conn.sndWndScale = uint8(synOpts.WS)
-		conn.rcvWndScale = calculateWindowScale(cfg.ReadBufferSize)
+		wndScaleBasis := cfg.ReadBufferSize
+		if cfg.MaxReadBufferSize > wndScaleBasis {
+			wndScaleBasis = cfg.MaxReadBufferSize
+		}
+		conn.rcvWndScale = calculateWindowScale(wndScaleBasis)
 	}
 
 	// SACK: only enable if peer offered it.

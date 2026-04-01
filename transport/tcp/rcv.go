@@ -1,6 +1,10 @@
 package tcp
 
-import "github.com/Zwlin98/netstack/header"
+import (
+	"time"
+
+	"github.com/Zwlin98/netstack/header"
+)
 
 // receiver tracks the receive side of a TCP connection.
 type receiver struct {
@@ -16,6 +20,18 @@ type receiver struct {
 	// Deferred FIN: set when FIN arrives before all preceding data.
 	finReceived bool
 	finSeq      uint32 // sequence number where FIN sits (after all data)
+
+	// DSACK (RFC 2883): pending DSACK block to include in the next ACK.
+	// Cleared after being sent once (one-shot notification).
+	dsackBlock    header.SACKBlock
+	hasDSACKBlock bool
+
+	// Receive buffer auto-tuning: grow readBuf based on throughput.
+	autoTune struct {
+		measureStart   time.Time // when current measurement window began
+		bytesDelivered int       // bytes delivered in current window
+		maxBufSize     int       // maximum buffer capacity (config limit)
+	}
 }
 
 type oooSegment struct {
@@ -23,13 +39,18 @@ type oooSegment struct {
 	data []byte
 }
 
-func newReceiver(irs uint32, readBuf *ringBuffer, conn *TCPConn) *receiver {
-	return &receiver{
+func newReceiver(irs uint32, readBuf *ringBuffer, conn *TCPConn, maxBufSize int) *receiver {
+	r := &receiver{
 		irs:     irs,
 		nxt:     irs + 1, // SYN consumed one sequence number
 		readBuf: readBuf,
 		conn:    conn,
 	}
+	// Enable auto-tuning if maxBufSize > initial capacity.
+	if maxBufSize > readBuf.Cap() {
+		r.autoTune.maxBufSize = maxBufSize
+	}
+	return r
 }
 
 // rcvWnd returns the current receive window size in bytes (unscaled),
@@ -78,7 +99,9 @@ func (r *receiver) handleData(seq uint32, data []byte) {
 	if seqLessThan(seq, r.nxt) {
 		overlap := r.nxt - seq
 		if overlap >= uint32(len(data)) {
-			// Fully duplicate segment — ignore.
+			// Fully duplicate segment — record DSACK block (RFC 2883).
+			r.dsackBlock = header.SACKBlock{Start: seq, End: seq + uint32(len(data))}
+			r.hasDSACKBlock = true
 			return
 		}
 		data = data[overlap:]
@@ -127,10 +150,78 @@ func (r *receiver) handleData(seq uint32, data []byte) {
 }
 
 func (r *receiver) deliver(data []byte) int {
-	return r.readBuf.WriteNoBlock(data)
+	n := r.readBuf.WriteNoBlock(data)
+	if n > 0 {
+		r.autoTuneAccumulate(n)
+	}
+	return n
+}
+
+// autoTuneAccumulate tracks delivered bytes and triggers buffer growth checks
+// when one SRTT measurement window completes.
+func (r *receiver) autoTuneAccumulate(n int) {
+	if r.autoTune.maxBufSize <= 0 {
+		return // auto-tuning disabled
+	}
+
+	now := time.Now()
+	if r.autoTune.measureStart.IsZero() {
+		r.autoTune.measureStart = now
+	}
+	r.autoTune.bytesDelivered += n
+
+	// Check if one SRTT has elapsed.
+	srtt := r.senderSRTT()
+	if srtt <= 0 {
+		return // no RTT measurement yet
+	}
+	if now.Sub(r.autoTune.measureStart) < srtt {
+		return // window not yet complete
+	}
+
+	// Measurement window complete — check if buffer should grow.
+	r.autoTuneCheck()
+}
+
+// senderSRTT returns the sender's smoothed RTT, or 0 if unavailable.
+func (r *receiver) senderSRTT() time.Duration {
+	if r.conn.snd != nil {
+		return r.conn.snd.srtt
+	}
+	return 0
+}
+
+// autoTuneCheck evaluates whether to grow the receive buffer based on throughput.
+// If throughput per RTT > 50% of buffer capacity, double the buffer.
+func (r *receiver) autoTuneCheck() {
+	curCap := r.readBuf.Cap()
+	threshold := curCap / 2
+
+	if r.autoTune.bytesDelivered > threshold && curCap < r.autoTune.maxBufSize {
+		newCap := min(curCap*2, r.autoTune.maxBufSize)
+		r.readBuf.Grow(newCap)
+	}
+
+	// Reset measurement window.
+	r.autoTune.measureStart = time.Now()
+	r.autoTune.bytesDelivered = 0
 }
 
 func (r *receiver) insertOOO(seq uint32, data []byte) {
+	// DSACK check: if the segment is entirely covered by an existing OOO entry,
+	// record it as a DSACK block (RFC 2883) and discard the duplicate.
+	origSeq := seq
+	origEnd := seq + uint32(len(data))
+	for _, entry := range r.ooo {
+		entryEnd := entry.seq + uint32(len(entry.data))
+		if !seqLessThan(origSeq, entry.seq) && !seqGreaterThan(origEnd, entryEnd) {
+			// Fully covered by existing OOO entry — duplicate.
+			r.dsackBlock = header.SACKBlock{Start: origSeq, End: origEnd}
+			r.hasDSACKBlock = true
+			return
+		}
+	}
+
 	// Copy data since the packet buffer will be released.
 	saved := make([]byte, len(data))
 	copy(saved, data)
@@ -193,40 +284,62 @@ func (r *receiver) insertOOO(seq uint32, data []byte) {
 }
 
 // sackBlocks returns the current SACK blocks from the OOO buffer.
-// Returns up to 3 blocks, most-recent-first. Adjacent/overlapping
-// segments are coalesced into a single block.
+// If a DSACK block is pending (RFC 2883), it is prepended as the first block
+// and cleared after this call (one-shot notification).
+// The total number of blocks is limited to fit within the TCP options space:
+// 3 blocks when timestamps are enabled, 4 blocks otherwise.
 func (r *receiver) sackBlocks() []header.SACKBlock {
-	if len(r.ooo) == 0 {
+	hasDSACK := r.hasDSACKBlock
+	if len(r.ooo) == 0 && !hasDSACK {
 		return nil
 	}
 
-	// Build coalesced ranges from sorted OOO segments.
-	var ranges []header.SACKBlock
-	cur := header.SACKBlock{
-		Start: r.ooo[0].seq,
-		End:   r.ooo[0].seq + uint32(len(r.ooo[0].data)),
+	// With timestamps (12 bytes), only 3 SACK blocks fit in TCP options.
+	// Without timestamps, up to 4 blocks fit.
+	maxBlocks := 4
+	if r.conn.tsEnabled {
+		maxBlocks = 3
 	}
-	for j := 1; j < len(r.ooo); j++ {
-		seg := r.ooo[j]
-		segEnd := seg.seq + uint32(len(seg.data))
-		if seg.seq <= cur.End {
-			// Adjacent or overlapping — extend.
-			if segEnd > cur.End {
-				cur.End = segEnd
+
+	var blocks []header.SACKBlock
+
+	// Prepend DSACK block if pending.
+	if hasDSACK {
+		blocks = append(blocks, r.dsackBlock)
+		r.hasDSACKBlock = false
+		r.dsackBlock = header.SACKBlock{}
+	}
+
+	if len(r.ooo) > 0 {
+		// Build coalesced ranges from sorted OOO segments.
+		var ranges []header.SACKBlock
+		cur := header.SACKBlock{
+			Start: r.ooo[0].seq,
+			End:   r.ooo[0].seq + uint32(len(r.ooo[0].data)),
+		}
+		for j := 1; j < len(r.ooo); j++ {
+			seg := r.ooo[j]
+			segEnd := seg.seq + uint32(len(seg.data))
+			if seg.seq <= cur.End {
+				// Adjacent or overlapping — extend.
+				if segEnd > cur.End {
+					cur.End = segEnd
+				}
+			} else {
+				ranges = append(ranges, cur)
+				cur = header.SACKBlock{Start: seg.seq, End: segEnd}
 			}
-		} else {
-			ranges = append(ranges, cur)
-			cur = header.SACKBlock{Start: seg.seq, End: segEnd}
+		}
+		ranges = append(ranges, cur)
+
+		// Append regular blocks (most-recent-first), staying within limit.
+		remaining := maxBlocks - len(blocks)
+		n := min(len(ranges), remaining)
+		for i := range n {
+			blocks = append(blocks, ranges[len(ranges)-1-i])
 		}
 	}
-	ranges = append(ranges, cur)
 
-	// Return up to 3 blocks, most-recent-first.
-	n := min(len(ranges), 3)
-	blocks := make([]header.SACKBlock, n)
-	for i := range n {
-		blocks[i] = ranges[len(ranges)-1-i]
-	}
 	return blocks
 }
 

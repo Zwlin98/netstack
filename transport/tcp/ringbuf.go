@@ -193,6 +193,50 @@ func (rb *ringBuffer) WriteNoBlock(p []byte) int {
 	return n
 }
 
+// Grow resizes the buffer to newCap, preserving unread data.
+// If newCap <= current capacity, this is a no-op.
+func (rb *ringBuffer) Grow(newCap int) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	oldCap := len(rb.buf)
+	if newCap <= oldCap {
+		return
+	}
+
+	used := rb.lenLocked()
+	newBuf := make([]byte, newCap)
+
+	// Copy unread data into the new buffer starting at position 0.
+	if used > 0 {
+		if rb.r < rb.w || (rb.full && rb.r == rb.w) {
+			// Data is contiguous or buffer is full.
+			if rb.full || rb.r < rb.w {
+				if rb.r < rb.w {
+					copy(newBuf, rb.buf[rb.r:rb.w])
+				} else {
+					// Full buffer: r == w. Copy from r to end, then 0 to w.
+					n := copy(newBuf, rb.buf[rb.r:])
+					copy(newBuf[n:], rb.buf[:rb.w])
+				}
+			}
+		} else {
+			// Data wraps around: copy r..end, then 0..w.
+			n := copy(newBuf, rb.buf[rb.r:])
+			copy(newBuf[n:], rb.buf[:rb.w])
+		}
+	}
+
+	rb.buf = newBuf
+	rb.r = 0
+	rb.w = used
+	rb.full = false
+
+	// Signal writers that space is available.
+	close(rb.notFull)
+	rb.notFull = make(chan struct{})
+}
+
 // CloseWrite signals that no more data will be written.
 // Subsequent Read calls will return io.EOF once the buffer is drained.
 func (rb *ringBuffer) CloseWrite() {

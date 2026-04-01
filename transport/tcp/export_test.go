@@ -51,3 +51,47 @@ func OOOCount(c *TCPConn) int {
 	}
 	return 0
 }
+
+// SenderDSACKSeen returns whether the sender has detected a DSACK.
+func SenderDSACKSeen(c *TCPConn) bool {
+	if c.snd != nil {
+		return c.snd.dsackSeen
+	}
+	return false
+}
+
+// ClearSenderDSACK clears the DSACK seen flag.
+func ClearSenderDSACK(c *TCPConn) {
+	if c.snd != nil {
+		c.snd.dsackSeen = false
+	}
+}
+
+// SenderMaxWnd returns the sender's maxWnd for testing.
+func SenderMaxWnd(c *TCPConn) uint32 {
+	if c.snd != nil {
+		return c.snd.maxWnd
+	}
+	return 0
+}
+
+// SenderWnd returns the sender's current peer window for testing.
+func SenderWnd(c *TCPConn) uint32 {
+	if c.snd != nil {
+		return c.snd.wnd
+	}
+	return 0
+}
+
+// ReadBufCap returns the receive buffer capacity for testing.
+func ReadBufCap(c *TCPConn) int {
+	if c.readBuf != nil {
+		return c.readBuf.Cap()
+	}
+	return 0
+}
+
+// NewRingBufferExported creates a new ringBuffer for testing.
+func NewRingBufferExported(size int) *ringBuffer {
+	return newRingBuffer(size)
+}

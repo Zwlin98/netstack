@@ -12,6 +12,7 @@ func (c *TCPConn) handleEstablished(seg segment) {
 	if seg.flags.Has(header.TCPFlagACK) && c.snd != nil {
 		oldWnd := c.snd.wnd
 		c.snd.wnd = uint32(seg.wnd) << c.sndWndScale
+		c.snd.updateMaxWnd(c.snd.wnd)
 
 		// RTTM: measure RTT from timestamp echo (RFC 7323 §4).
 		c.measureRTTM(seg)
@@ -20,7 +21,7 @@ func (c *TCPConn) handleEstablished(seg segment) {
 		if c.sackPermitted && len(seg.options) > 0 {
 			so := header.ParseSegmentOptions(seg.options)
 			if len(so.SACKBlocks) > 0 {
-				c.snd.processSACKBlocks(so.SACKBlocks)
+				c.snd.processSACKBlocks(so.SACKBlocks, seg.ack)
 				c.snd.sackLossDetection(c)
 			}
 		}
