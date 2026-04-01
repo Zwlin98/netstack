@@ -4,16 +4,26 @@ import (
 	"time"
 
 	"github.com/Zwlin98/netstack/header"
+	"github.com/Zwlin98/netstack/packet"
 )
 
-// unackedSegment holds a copy of a sent segment for possible retransmission.
+// unackedSegment holds a sent segment for possible retransmission.
+// Data segments share a ref-counted RefBuf with the send path to avoid copying.
 type unackedSegment struct {
 	seq           uint32
-	data          []byte
-	fin           bool // true if this is a FIN segment
+	ref           *packet.RefBuf // payload data (nil for FIN-only segments)
+	fin           bool           // true if this is a FIN segment
 	sentAt        time.Time
 	retransmitted bool
 	sacked        bool // marked as SACKed by peer
+}
+
+// dataLen returns the payload length (0 for FIN-only segments).
+func (s *unackedSegment) dataLen() int {
+	if s.ref != nil {
+		return s.ref.Len()
+	}
+	return 0
 }
 
 // sender tracks the send side of a TCP connection.
@@ -137,15 +147,16 @@ func (s *sender) sendPending(conn *TCPConn) {
 		}
 
 		segSize := min(min(windowLeft, available), s.mss)
-		data := make([]byte, segSize)
-		n := conn.writeBuf.ReadNoBlock(data)
+		ref := packet.GetRefBuf()
+		n := conn.writeBuf.ReadNoBlock(ref.Buf()[:segSize])
 		if n == 0 {
+			ref.DecRef()
 			break
 		}
-		data = data[:n]
+		ref.SetLen(n)
 
-		conn.sendData(data, s.nxt)
-		s.recordSent(s.nxt, data)
+		conn.sendData(ref.Bytes(), s.nxt)
+		s.recordSent(s.nxt, ref)
 		s.nxt += uint32(n)
 	}
 }
@@ -169,11 +180,14 @@ func (s *sender) updateRTT(measured time.Duration) {
 	s.rto = min(s.rto, s.maxRTO)
 }
 
-// recordSent saves a copy of sent data for possible retransmission.
-func (s *sender) recordSent(seq uint32, data []byte) {
+// recordSent saves a reference to sent data for possible retransmission.
+// The RefBuf's reference count is incremented so the data stays alive
+// until both the send path and the retransmit queue are done with it.
+func (s *sender) recordSent(seq uint32, ref *packet.RefBuf) {
+	ref.IncRef()
 	s.unacked = append(s.unacked, unackedSegment{
 		seq:    seq,
-		data:   append([]byte(nil), data...), // copy
+		ref:    ref,
 		sentAt: time.Now(),
 	})
 }
@@ -186,7 +200,7 @@ func (s *sender) removeAcked(ack uint32, conn *TCPConn) {
 	i := 0
 	for i < len(s.unacked) {
 		seg := &s.unacked[i]
-		segEnd := seg.seq + uint32(len(seg.data))
+		segEnd := seg.seq + uint32(seg.dataLen())
 		if seg.fin {
 			segEnd = seg.seq + 1 // FIN occupies one sequence number
 		}
@@ -200,6 +214,9 @@ func (s *sender) removeAcked(ack uint32, conn *TCPConn) {
 			rttMeasured = true
 		}
 		if seqLessThan(segEnd, ack) || segEnd == ack {
+			if seg.ref != nil {
+				seg.ref.DecRef()
+			}
 			i++
 		} else {
 			break
@@ -233,7 +250,7 @@ func (s *sender) retransmitOldest(conn *TCPConn) {
 	if seg.fin {
 		conn.sendFINSegment(seg.seq)
 	} else {
-		conn.sendData(seg.data, seg.seq)
+		conn.sendData(seg.ref.Bytes(), seg.seq)
 	}
 }
 
@@ -290,7 +307,7 @@ func (s *sender) processSACKBlocks(blocks []header.SACKBlock, ack uint32) {
 		if seg.sacked {
 			continue
 		}
-		segEnd := seg.seq + uint32(len(seg.data))
+		segEnd := seg.seq + uint32(seg.dataLen())
 		for _, b := range blocks {
 			if seg.seq >= b.Start && segEnd <= b.End {
 				seg.sacked = true
@@ -310,7 +327,7 @@ func (s *sender) retransmitFirstUnSACKed(conn *TCPConn) {
 			if seg.fin {
 				conn.sendFINSegment(seg.seq)
 			} else {
-				conn.sendData(seg.data, seg.seq)
+				conn.sendData(seg.ref.Bytes(), seg.seq)
 			}
 			return
 		}
@@ -335,7 +352,7 @@ func (s *sender) sackLossDetection(conn *TCPConn) {
 		if sackedAbove >= 3 {
 			seg.retransmitted = true
 			seg.sentAt = time.Now()
-			conn.sendData(seg.data, seg.seq)
+			conn.sendData(seg.ref.Bytes(), seg.seq)
 		}
 	}
 }
@@ -433,13 +450,14 @@ func (s *sender) limitedTransmit(conn *TCPConn) {
 	if segSize <= 0 {
 		return
 	}
-	data := make([]byte, segSize)
-	n := conn.writeBuf.ReadNoBlock(data)
+	ref := packet.GetRefBuf()
+	n := conn.writeBuf.ReadNoBlock(ref.Buf()[:segSize])
 	if n == 0 {
+		ref.DecRef()
 		return
 	}
-	data = data[:n]
-	conn.sendData(data, s.nxt)
-	s.recordSent(s.nxt, data)
+	ref.SetLen(n)
+	conn.sendData(ref.Bytes(), s.nxt)
+	s.recordSent(s.nxt, ref)
 	s.nxt += uint32(n)
 }

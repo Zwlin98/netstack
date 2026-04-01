@@ -16,9 +16,9 @@ var errClosed = errors.New("udp: handler closed")
 
 // udpDatagram is an inbound UDP datagram queued for ReadFrom.
 type udpDatagram struct {
-	payload []byte
-	src     tcpip.FullAddress
-	dst     tcpip.FullAddress
+	ref *packet.RefBuf
+	src tcpip.FullAddress
+	dst tcpip.FullAddress
 }
 
 // UDPHandler implements stack.TransportHandler for UDP.
@@ -56,12 +56,13 @@ func (h *UDPHandler) HandlePacket(pb *packet.PacketBuffer) {
 	udpHdr := header.UDP(pb.Data[:header.UDPHeaderSize])
 	payload := pb.Data[header.UDPHeaderSize:]
 
-	// Copy payload — PacketBuffer is released after this function returns.
-	buf := make([]byte, len(payload))
-	copy(buf, payload)
+	// Copy payload into pooled RefBuf — PacketBuffer is released after this function returns.
+	ref := packet.GetRefBuf()
+	copy(ref.Buf(), payload)
+	ref.SetLen(len(payload))
 
 	dg := udpDatagram{
-		payload: buf,
+		ref: ref,
 		src: tcpip.FullAddress{
 			Addr: ipHdr.SourceAddress(),
 			Port: udpHdr.SourcePort(),
@@ -76,6 +77,7 @@ func (h *UDPHandler) HandlePacket(pb *packet.PacketBuffer) {
 	select {
 	case h.inbound <- dg:
 	default:
+		ref.DecRef()
 	}
 }
 
@@ -86,7 +88,8 @@ func (h *UDPHandler) HandlePacket(pb *packet.PacketBuffer) {
 func (h *UDPHandler) ReadFrom(b []byte) (n int, src, dst tcpip.FullAddress, err error) {
 	select {
 	case dg := <-h.inbound:
-		n = copy(b, dg.payload)
+		n = copy(b, dg.ref.Bytes())
+		dg.ref.DecRef()
 		return n, dg.src, dg.dst, nil
 	case <-h.done:
 		return 0, tcpip.FullAddress{}, tcpip.FullAddress{}, errClosed

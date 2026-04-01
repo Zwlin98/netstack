@@ -278,16 +278,17 @@ func (c *TCPConn) sendZeroWindowProbe() {
 		return
 	}
 	// Peek 1 byte from writeBuf without consuming it.
-	probe := make([]byte, 1)
-	n := c.writeBuf.ReadNoBlock(probe)
+	ref := packet.GetRefBuf()
+	n := c.writeBuf.ReadNoBlock(ref.Buf()[:1])
 	if n == 0 {
+		ref.DecRef()
 		// No data to probe with — stop probing.
 		c.cancelZeroWindowProbe()
 		return
 	}
-	probe = probe[:n]
-	c.sendData(probe, c.snd.nxt)
-	c.snd.recordSent(c.snd.nxt, probe)
+	ref.SetLen(n)
+	c.sendData(ref.Bytes(), c.snd.nxt)
+	c.snd.recordSent(c.snd.nxt, ref)
 	c.snd.nxt += uint32(n)
 }
 
