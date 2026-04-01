@@ -242,8 +242,42 @@ stateDiagram-v2
 
 ## 测试
 
+### 单元测试
+
 ```bash
 go test ./...
 ```
 
 TCP 测试包含从 [gVisor](https://github.com/google/gvisor) 移植的工业级测试用例，覆盖握手边界条件、拥塞控制、连接关闭和 RFC 合规性。
+
+### 集成测试
+
+集成测试通过 TUN 设备进行真实网络栈交互，需要 root 权限和 `tc`/`iperf3` 等工具：
+
+```bash
+# 运行全部集成测试
+sudo ./test/run_all.sh
+
+# 运行指定测试
+sudo ./test/run_all.sh test/01_icmp.sh test/02_tcp_echo.sh
+```
+
+| 脚本 | 说明 |
+|------|------|
+| `01_icmp.sh` | ICMP Echo Reply（ping 响应） |
+| `02_tcp_echo.sh` | TCP 回显基本功能 |
+| `03_udp_echo.sh` | UDP 数据报收发 |
+| `04_packet_loss.sh` | 丢包场景下的 TCP 重传恢复 |
+| `05_concurrent.sh` | 多连接并发 |
+| `06_iperf3.sh` | iperf3 吞吐量测试 |
+| `07_reorder.sh` | 乱序报文处理 |
+| `08_duplicate.sh` | 重复报文处理 |
+| `09_jitter.sh` | 网络抖动场景 |
+| `10_bandwidth.sh` | 带宽限制场景 |
+| `11_large_transfer.sh` | 大数据量传输 |
+| `12_stress.sh` | 高并发压力测试 |
+| `13_combined.sh` | 组合网络劣化（丢包+延迟+乱序） |
+| `14_zero_window.sh` | 零窗口探测 |
+| `15_conn_lifecycle.sh` | 连接生命周期（建立→传输→关闭） |
+| `16_half_close.sh` | 半关闭（单向 shutdown） |
+| `17_abrupt_disconnect.sh` | 异常断开（RST 处理） |
