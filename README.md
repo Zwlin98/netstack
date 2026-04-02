@@ -22,6 +22,7 @@
 - **ICMP** — 自动 Echo Reply（ping 响应）
 - **TUN** — 内置 Linux TUN 设备驱动，支持 GRO/GSO 和校验和卸载
 - **GSO** — TCP 发送路径 Generic Segmentation Offload，将多个 MSS 合并为单次系统调用
+- **可观测性** — 零成本可选的聚合计数器（Stack/TCP/UDP）+ 每连接快照（RTT、cwnd、窗口、缓冲区）
 - 零拷贝包缓冲区 + `sync.Pool` 对象复用（含 GSO 64KB 缓冲池）
 
 ## 架构
@@ -234,6 +235,96 @@ stateDiagram-v2
     TIME_WAIT --> [*] : 2×MSL 超时
 ```
 
+### 可观测性
+
+netstack 提供零成本可选的内部指标，未启用时仅增加一次 nil 指针检查，无性能损耗。
+
+```go
+// 启用各层统计（在 Start() 之前调用）
+stkStats := s.EnableStats()
+tcpStats := tcpHandler.EnableStats()
+udpStats := udpHandler.EnableStats()
+
+s.Start()
+
+// 随时读取聚合计数器
+fmt.Printf("TCP active: %d, retransmits: %d\n",
+    tcpStats.ActiveConns.Load(),
+    tcpStats.Retransmits.Load())
+
+// 出站队列水位（不需要启用 stats）
+fmt.Printf("outbound queue: %d\n", s.OutboundQueueLen())
+
+// 每连接快照
+for _, snap := range tcpHandler.ConnSnapshots() {
+    fmt.Printf("%s state=%s rtt=%s cwnd=%d\n",
+        snap.Flow.SrcAddr, snap.State, snap.SRTT, snap.Cwnd)
+}
+
+// 查询单个连接
+if snap := tcpHandler.ConnSnapshot(flow); snap != nil {
+    fmt.Printf("unacked=%d ooo=%d\n", snap.Unacked, snap.OOO)
+}
+```
+
+#### Stack 指标 (`stack.Stats`)
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `PacketsIn` | `atomic.Uint64` | 收到的有效 IPv4 包总数 |
+| `PacketsOut` | `atomic.Uint64` | 发出的包总数 |
+| `BytesIn` | `atomic.Uint64` | 收到的原始字节数（含所有头部） |
+| `BytesOut` | `atomic.Uint64` | 发出的原始字节数（含所有头部） |
+| `DroppedOutbound` | `atomic.Uint64` | 因出站队列满而丢弃的包 |
+| `UnknownProtocol` | `atomic.Uint64` | 无注册处理器的协议包 |
+
+另有 `Stack.OutboundQueueLen() int` 返回出站队列当前深度。
+
+#### TCP 指标 (`tcp.Stats`)
+
+| 分类 | 字段 | 说明 |
+|------|------|------|
+| 连接生命周期 | `ActiveConns` (Int64) | 当前活跃连接数 |
+| | `TotalAccepted` | 累计建立的连接 |
+| | `TotalClosed` | 累计关闭的连接 |
+| | `TotalReset` | RST 终止的连接 |
+| 流量 | `SegmentsIn` / `SegmentsOut` | TCP 段收发数 |
+| | `PayloadBytesIn` / `PayloadBytesOut` | 有效载荷字节数 |
+| 错误 | `ChecksumErrors` | 校验和错误 |
+| | `DroppedInbound` | 连接入站队列满丢弃 |
+| | `Retransmits` | RTO 重传次数 |
+| | `FastRetransmits` | 快速重传次数 |
+| | `DupACKsIn` | 收到的重复 ACK |
+| 协议 | `ResetsSent` / `ResetsReceived` | RST 段收发数 |
+| | `ZeroWindowProbes` | 零窗口探测次数 |
+| | `PAWSDrops` | PAWS 丢弃的段 |
+| 超时 | `TimeoutKeepalive` | Keepalive 超时断开 |
+| | `TimeoutFinWait2` | FIN_WAIT_2 超时 |
+| | `TimeoutSynRcvd` | SYN_RCVD 超时 |
+
+#### TCP 连接快照 (`tcp.ConnSnapshot`)
+
+| 字段 | 说明 |
+|------|------|
+| `Flow` | 四元组 |
+| `State` | TCP 状态 |
+| `SRTT` / `RTO` | 平滑 RTT / 重传超时 |
+| `Cwnd` / `SSThresh` | 拥塞窗口 / 慢启动阈值 |
+| `SndWnd` / `RcvWnd` | 对端窗口 / 本端窗口 |
+| `Unacked` / `OOO` | 未确认段 / 乱序段 |
+| `ReadBufUsed` / `WriteBufUsed` / `BufCap` | 缓冲区使用情况 |
+| `Retries` | 当前重试次数 |
+| `InRecovery` | 是否在快速恢复中 |
+
+#### UDP 指标 (`udp.Stats`)
+
+| 字段 | 说明 |
+|------|------|
+| `DatagramsIn` / `DatagramsOut` | 数据报收发数 |
+| `BytesIn` / `BytesOut` | 有效载荷字节数 |
+| `DroppedInbound` | 入站队列满丢弃 |
+| `ChecksumErrors` | 校验和错误 |
+
 ## 设计要点
 
 - **IPv4-only** — 不支持 IPv6
@@ -279,6 +370,7 @@ sudo ./test/run_all.sh test/01_icmp.sh test/02_tcp_echo.sh
 | `16_half_close.sh` | 半关闭（单向 shutdown） |
 | `17_abrupt_disconnect.sh` | 异常断开（RST 处理） |
 | `18_gso_verify.sh` | GSO 分段验证（strace writev 追踪） |
+| `19_stats.sh` | 可观测性计数器验证 |
 
 ## 致谢
 

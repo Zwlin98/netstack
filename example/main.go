@@ -17,7 +17,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"io"
+	"strings"
 	"log"
 	"net"
 	"os"
@@ -39,6 +41,7 @@ var (
 	tunSubnet  = flag.String("subnet", "10.0.0.0/24", "route subnet for TUN device")
 	forwardAddr = flag.String("forward", "", "forward all TCP to this address (e.g. host:5201)")
 	readDelay   = flag.Duration("read-delay", 0, "delay between reads in echo handler (e.g. 50ms)")
+	statsFlag   = flag.Bool("stats", false, "enable stats and log periodically")
 )
 
 func main() {
@@ -68,6 +71,14 @@ func main() {
 
 	udpHandler := udp.NewUDPHandler(s)
 	s.RegisterHandler(tcpip.UDPProtocolNumber, udpHandler)
+
+	// Enable stats if requested.
+	if *statsFlag {
+		stkStats := s.EnableStats()
+		tcpStats := tcpHandler.EnableStats()
+		udpStats := udpHandler.EnableStats()
+		go logStats(s, stkStats, tcpStats, udpStats, tcpHandler)
+	}
 
 	s.Start()
 	defer s.Stop()
@@ -155,6 +166,47 @@ func udpEcho(h *udp.UDPHandler) {
 		}
 		log.Printf("[udp] %d bytes from %s → %s", n, src, dst)
 		h.WriteTo(buf[:n], dst, src)
+	}
+}
+
+func logStats(s *stack.Stack, stkStats *stack.Stats, tcpStats *tcp.Stats, udpStats *udp.Stats, tcpHandler *tcp.TCPHandler) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		log.Printf("[stats] stack: in=%d out=%d bytes_in=%d bytes_out=%d dropped=%d unknown=%d queue=%d",
+			stkStats.PacketsIn.Load(), stkStats.PacketsOut.Load(),
+			stkStats.BytesIn.Load(), stkStats.BytesOut.Load(),
+			stkStats.DroppedOutbound.Load(), stkStats.UnknownProtocol.Load(),
+			s.OutboundQueueLen())
+		log.Printf("[stats] tcp: active=%d accepted=%d closed=%d reset=%d seg_in=%d seg_out=%d "+
+			"bytes_in=%d bytes_out=%d retx=%d fast_retx=%d dup_ack=%d rst_sent=%d rst_rcvd=%d "+
+			"chksum_err=%d dropped=%d zwp=%d paws=%d",
+			tcpStats.ActiveConns.Load(), tcpStats.TotalAccepted.Load(),
+			tcpStats.TotalClosed.Load(), tcpStats.TotalReset.Load(),
+			tcpStats.SegmentsIn.Load(), tcpStats.SegmentsOut.Load(),
+			tcpStats.PayloadBytesIn.Load(), tcpStats.PayloadBytesOut.Load(),
+			tcpStats.Retransmits.Load(), tcpStats.FastRetransmits.Load(),
+			tcpStats.DupACKsIn.Load(), tcpStats.ResetsSent.Load(),
+			tcpStats.ResetsReceived.Load(), tcpStats.ChecksumErrors.Load(),
+			tcpStats.DroppedInbound.Load(), tcpStats.ZeroWindowProbes.Load(),
+			tcpStats.PAWSDrops.Load())
+		log.Printf("[stats] udp: in=%d out=%d bytes_in=%d bytes_out=%d dropped=%d chksum_err=%d",
+			udpStats.DatagramsIn.Load(), udpStats.DatagramsOut.Load(),
+			udpStats.BytesIn.Load(), udpStats.BytesOut.Load(),
+			udpStats.DroppedInbound.Load(), udpStats.ChecksumErrors.Load())
+
+		// Per-connection snapshots.
+		snaps := tcpHandler.ConnSnapshots()
+		if len(snaps) > 0 {
+			var lines []string
+			for _, snap := range snaps {
+				lines = append(lines, fmt.Sprintf("  %s→%s:%d state=%s rtt=%s cwnd=%d unacked=%d rbuf=%d/%d",
+					snap.Flow.SrcAddr, snap.Flow.DstAddr, snap.Flow.DstPort,
+					snap.State, snap.SRTT, snap.Cwnd, snap.Unacked,
+					snap.ReadBufUsed, snap.BufCap))
+			}
+			log.Printf("[stats] connections:\n%s", strings.Join(lines, "\n"))
+		}
 	}
 }
 
