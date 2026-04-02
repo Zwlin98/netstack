@@ -20,8 +20,9 @@
   - 超时管理：SYN_RCVD、FIN_WAIT_2、TIME_WAIT (2×MSL)
 - **UDP** — PacketConn 风格 API（ReadFrom / WriteTo），上层自由处理数据
 - **ICMP** — 自动 Echo Reply（ping 响应）
-- **TUN** — 内置 Linux TUN 设备驱动，支持 GRO 合并和校验和卸载
-- 零拷贝包缓冲区 + `sync.Pool` 对象复用
+- **TUN** — 内置 Linux TUN 设备驱动，支持 GRO/GSO 和校验和卸载
+- **GSO** — TCP 发送路径 Generic Segmentation Offload，将多个 MSS 合并为单次系统调用
+- 零拷贝包缓冲区 + `sync.Pool` 对象复用（含 GSO 64KB 缓冲池）
 
 ## 架构
 
@@ -213,8 +214,8 @@ go func() {
 | `header` | 零拷贝协议头视图：IPv4、TCP、UDP、ICMPv4 + 校验和 |
 | `packet` | `PacketBuffer` — 带 headroom 的包缓冲区，`sync.Pool` 复用 |
 | `channel` | `Channel` 接口 + `MemoryChannel`（内存实现，用于测试） |
-| `channel/tun` | Linux TUN 设备驱动，支持 GRO/校验和卸载 |
-| `stack` | 协议栈核心：IPv4 解析、协议分发、ICMP、读写循环、`Config` + `Option` |
+| `channel/tun` | Linux TUN 设备驱动，支持 GRO/GSO/校验和卸载 |
+| `stack` | 协议栈核心：IPv4 解析、协议分发、ICMP、读写循环、GSO 分发、`Config` + `Option` |
 | `transport/tcp` | TCP 实现：`TCPHandler` / `TCPListener` / `TCPConn`、`Config` + `Option` |
 | `transport/udp` | UDP 数据报收发：`UDPHandler`（ReadFrom / WriteTo）、`Config` + `Option` |
 
@@ -281,3 +282,4 @@ sudo ./test/run_all.sh test/01_icmp.sh test/02_tcp_echo.sh
 | `15_conn_lifecycle.sh` | 连接生命周期（建立→传输→关闭） |
 | `16_half_close.sh` | 半关闭（单向 shutdown） |
 | `17_abrupt_disconnect.sh` | 异常断开（RST 处理） |
+| `18_gso_verify.sh` | GSO 分段验证（strace writev 追踪） |
