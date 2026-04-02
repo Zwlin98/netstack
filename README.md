@@ -330,6 +330,15 @@ if snap := tcpHandler.ConnSnapshot(flow); snap != nil {
 - **IPv4-only** — 不支持 IPv6
 - **服务端 TCP** — 支持 Listen/Accept，不支持主动 Dial
 - **TUN 网关** — 面向内网设备，client→gateway 存在真实网络 RTT
+
+## 注意事项
+
+- **不支持 IP 分片与重组** — TCP 通过 MSS 协商避免分片，UDP 拒绝超过 MTU 的数据报；收到的 IP 分片会被静默丢弃
+- **不支持 IPv6** — 仅处理 IPv4 流量
+- **仅被动 TCP** — 只支持 Listen/Accept，不支持主动发起连接（无 Dial/Connect/SYN_SENT）
+- **MTU 上限 1500** — 不支持巨帧（Jumbo Frame）
+- **无 PMTUD** — 不进行路径 MTU 发现，假定链路 MTU 固定
+
 ## 测试
 
 ### 单元测试
