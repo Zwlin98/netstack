@@ -12,7 +12,13 @@ import (
 	"github.com/Zwlin98/netstack/tcpip"
 )
 
-var errClosed = errors.New("udp: handler closed")
+var (
+	errClosed = errors.New("udp: handler closed")
+
+	// ErrMessageTooLong is returned by WriteTo when the payload exceeds the
+	// maximum UDP payload size allowed by the stack's MTU.
+	ErrMessageTooLong = errors.New("udp: message too long")
+)
 
 // udpDatagram is an inbound UDP datagram queued for ReadFrom.
 type udpDatagram struct {
@@ -25,11 +31,12 @@ type udpDatagram struct {
 // It provides a PacketConn-style ReadFrom/WriteTo API — the handler only
 // parses and builds protocol headers, it does not maintain flow state or NAT.
 type UDPHandler struct {
-	stk     *stack.Stack
-	inbound chan udpDatagram
-	done    chan struct{}
-	once    sync.Once
-	stats   *Stats
+	stk        *stack.Stack
+	inbound    chan udpDatagram
+	done       chan struct{}
+	once       sync.Once
+	stats      *Stats
+	maxPayload int // max UDP payload bytes (MTU - IPv4 - UDP headers)
 }
 
 // NewUDPHandler creates a UDPHandler.
@@ -39,9 +46,10 @@ func NewUDPHandler(s *stack.Stack, opts ...Option) *UDPHandler {
 		o(&cfg)
 	}
 	return &UDPHandler{
-		stk:     s,
-		inbound: make(chan udpDatagram, cfg.InboundQueueSize),
-		done:    make(chan struct{}),
+		stk:        s,
+		inbound:    make(chan udpDatagram, cfg.InboundQueueSize),
+		done:       make(chan struct{}),
+		maxPayload: s.MTU() - header.IPv4MinHeaderSize - header.UDPHeaderSize,
 	}
 }
 
@@ -112,6 +120,13 @@ func (h *UDPHandler) WriteTo(b []byte, src, dst tcpip.FullAddress) (int, error) 
 	case <-h.done:
 		return 0, errClosed
 	default:
+	}
+
+	if len(b) > h.maxPayload {
+		if st := h.stats; st != nil {
+			st.OversizedOut.Add(1)
+		}
+		return 0, ErrMessageTooLong
 	}
 
 	headroom := header.IPv4MinHeaderSize + header.UDPHeaderSize

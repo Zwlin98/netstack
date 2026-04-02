@@ -291,6 +291,104 @@ func TestNoGoroutineLeak(t *testing.T) {
 	}
 }
 
+func TestWriteToMaxPayload(t *testing.T) {
+	s, ch, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
+	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
+
+	// Exactly at the limit: MTU(1500) - IPv4(20) - UDP(8) = 1472.
+	payload := make([]byte, 1472)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	n, err := h.WriteTo(payload, src, dst)
+	if err != nil {
+		t.Fatalf("WriteTo with max payload: %v", err)
+	}
+	if n != len(payload) {
+		t.Errorf("WriteTo returned %d, want %d", n, len(payload))
+	}
+
+	raw := ch.Read(time.Second)
+	if raw == nil {
+		t.Fatal("expected packet on channel")
+	}
+
+	ip := header.IPv4(raw)
+	udpHdr := header.UDP(raw[ip.HeaderLength():])
+	got := udpHdr.Payload()
+	if !bytes.Equal(got, payload) {
+		t.Errorf("payload mismatch: got %d bytes, want %d", len(got), len(payload))
+	}
+}
+
+func TestWriteToOversized(t *testing.T) {
+	s, _, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
+	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
+
+	// One byte over the limit.
+	payload := make([]byte, 1473)
+	n, err := h.WriteTo(payload, src, dst)
+	if err != ErrMessageTooLong {
+		t.Fatalf("WriteTo returned error %v, want ErrMessageTooLong", err)
+	}
+	if n != 0 {
+		t.Errorf("WriteTo returned n=%d, want 0", n)
+	}
+}
+
+func TestWriteToEmptyPayload(t *testing.T) {
+	s, ch, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
+	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
+
+	n, err := h.WriteTo([]byte{}, src, dst)
+	if err != nil {
+		t.Fatalf("WriteTo with empty payload: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("WriteTo returned %d, want 0", n)
+	}
+
+	raw := ch.Read(time.Second)
+	if raw == nil {
+		t.Fatal("expected packet on channel")
+	}
+}
+
+func TestWriteToOversizedStats(t *testing.T) {
+	s, _, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	st := h.EnableStats()
+
+	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
+	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
+
+	payload := make([]byte, 1473)
+	h.WriteTo(payload, src, dst)
+	h.WriteTo(payload, src, dst)
+
+	if got := st.OversizedOut.Load(); got != 2 {
+		t.Errorf("OversizedOut = %d, want 2", got)
+	}
+	if got := st.DatagramsOut.Load(); got != 0 {
+		t.Errorf("DatagramsOut = %d, want 0", got)
+	}
+}
+
 func TestMultipleDatagrams(t *testing.T) {
 	s, ch, h := setupStack()
 	defer s.Stop()

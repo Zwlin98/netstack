@@ -10,6 +10,7 @@ type Stats struct {
 	BytesIn        atomic.Uint64
 	BytesOut       atomic.Uint64
 	DroppedInbound atomic.Uint64
+	OversizedOut   atomic.Uint64
 	ChecksumErrors atomic.Uint64
 }
 
