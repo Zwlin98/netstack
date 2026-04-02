@@ -54,3 +54,4 @@ This is a **server-only LAN gateway**. Clients connect to the TUN device over a 
 - **Nil-guarded stats** — `if st := c.stats; st != nil { st.Counter.Add(1) }` for zero-cost-when-disabled
 - **Defensive fixes** — include fixes even for rare edge cases to prevent potential issues
 - **Benchmarks** — TCP throughput benchmarks in `transport/tcp/throughput_bench_test.go` for profiling
+- **No sensitive info in code** — do not hardcode internal hostnames, IPs, or credentials in source, comments, or commit messages; use generic placeholders like `<remote-ip>`, `<ssh-host>`
