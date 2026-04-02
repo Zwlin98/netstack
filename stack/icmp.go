@@ -35,5 +35,9 @@ func (s *Stack) handleICMP(pb *packet.PacketBuffer, ipHdr header.IPv4) {
 	// Send directly — packet is already complete in the buffer.
 	// NetworkHeader and Data are contiguous in the backing buffer.
 	totalLen := len(pb.NetworkHeader) + len(icmpData)
+	if st := s.stats; st != nil {
+		st.PacketsOut.Add(1)
+		st.BytesOut.Add(uint64(totalLen))
+	}
 	s.channel.WritePacket(pb.NetworkHeader[:totalLen])
 }

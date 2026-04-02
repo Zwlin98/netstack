@@ -34,6 +34,8 @@ type Stack struct {
 
 	ttl uint8
 
+	stats *Stats
+
 	wg   sync.WaitGroup
 	done chan struct{}
 }
@@ -177,11 +179,22 @@ func (s *Stack) readLoop() {
 
 		switch proto {
 		case tcpip.ICMPv4ProtocolNumber:
+			if st := s.stats; st != nil {
+				st.PacketsIn.Add(1)
+				st.BytesIn.Add(uint64(n))
+			}
 			s.handleICMP(pb, ipHdr)
 		default:
 			if h, ok := s.handlers[proto]; ok {
+				if st := s.stats; st != nil {
+					st.PacketsIn.Add(1)
+					st.BytesIn.Add(uint64(n))
+				}
 				h.HandlePacket(pb)
 			} else {
+				if st := s.stats; st != nil {
+					st.UnknownProtocol.Add(1)
+				}
 				pb.Release()
 			}
 		}
@@ -195,13 +208,25 @@ func (s *Stack) writeLoop() {
 		select {
 		case item := <-s.outboundCh:
 			if item.gsoBuf != nil {
+				if st := s.stats; st != nil {
+					st.PacketsOut.Add(1)
+					st.BytesOut.Add(uint64(len(item.gsoBuf)))
+				}
 				// GSO packet — write with offload metadata, then return buffer to pool.
 				gw.WritePacketGSO(item.gsoBuf, item.gsoOpts)
 				packet.PutGSOBuf(item.gsoBuf)
 			} else if gsoOK {
+				if st := s.stats; st != nil {
+					st.PacketsOut.Add(1)
+					st.BytesOut.Add(uint64(len(item.pb.AsSlice())))
+				}
 				gw.WritePacketGSO(item.pb.AsSlice(), channel.PacketOptions{})
 				item.pb.Release()
 			} else {
+				if st := s.stats; st != nil {
+					st.PacketsOut.Add(1)
+					st.BytesOut.Add(uint64(len(item.pb.AsSlice())))
+				}
 				s.channel.WritePacket(item.pb.AsSlice())
 				item.pb.Release()
 			}
