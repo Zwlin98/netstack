@@ -5,7 +5,7 @@
 // Usage:
 //
 //	./echo                                   # echo mode (default)
-//	./echo -forward <ssh-host>:5201             # forward all TCP to remote host
+//	./echo -forward <host>:5201              # forward all TCP to remote host
 //
 // Test from another terminal:
 //
