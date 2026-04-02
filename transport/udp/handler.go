@@ -29,6 +29,7 @@ type UDPHandler struct {
 	inbound chan udpDatagram
 	done    chan struct{}
 	once    sync.Once
+	stats   *Stats
 }
 
 // NewUDPHandler creates a UDPHandler.
@@ -76,7 +77,14 @@ func (h *UDPHandler) HandlePacket(pb *packet.PacketBuffer) {
 	// Non-blocking enqueue; drop if full (UDP semantics).
 	select {
 	case h.inbound <- dg:
+		if st := h.stats; st != nil {
+			st.DatagramsIn.Add(1)
+			st.BytesIn.Add(uint64(len(payload)))
+		}
 	default:
+		if st := h.stats; st != nil {
+			st.DroppedInbound.Add(1)
+		}
 		ref.DecRef()
 	}
 }
@@ -133,6 +141,10 @@ func (h *UDPHandler) WriteTo(b []byte, src, dst tcpip.FullAddress) (int, error) 
 	)
 	udpHdr.SetChecksum(header.Checksum(fullUDP, phc))
 
+	if st := h.stats; st != nil {
+		st.DatagramsOut.Add(1)
+		st.BytesOut.Add(uint64(len(b)))
+	}
 	h.stk.SendPacket(pb, src.Addr, dst.Addr, tcpip.UDPProtocolNumber)
 	return len(b), nil
 }
