@@ -1,6 +1,7 @@
 package tcp
 
 import (
+	"github.com/Zwlin98/netstack/channel"
 	"github.com/Zwlin98/netstack/header"
 	"github.com/Zwlin98/netstack/packet"
 	"github.com/Zwlin98/netstack/tcpip"
@@ -42,6 +43,14 @@ func setTCPChecksum(hdr header.TCP, src, dst tcpip.Address, tcpLen uint16) {
 	hdr.SetChecksum(0)
 	partial := header.PseudoHeaderChecksum(tcpip.TCPProtocolNumber, src, dst, tcpLen)
 	hdr.SetChecksum(header.Checksum(hdr[:tcpLen], partial))
+}
+
+// setTCPPartialChecksum writes only the pseudo-header checksum into the TCP
+// checksum field. Used for GSO segments where the kernel completes the
+// per-segment checksum after splitting.
+func setTCPPartialChecksum(hdr header.TCP, src, dst tcpip.Address, tcpLen uint16) {
+	partial := header.PseudoHeaderChecksum(tcpip.TCPProtocolNumber, src, dst, tcpLen)
+	hdr.SetChecksum(partial)
 }
 
 func (c *TCPConn) sendSYNACK() {
@@ -166,6 +175,62 @@ func (c *TCPConn) sendData(data []byte, seq uint32) {
 	}
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, tcpLen)
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
+	c.updateTSLastAckSent()
+	c.lastWndZero = (wnd == 0)
+}
+
+// gsoDataOffset returns the byte offset within a GSO buffer where payload data starts.
+// Layout: [IP header][TCP header + options][payload...]
+func (c *TCPConn) gsoDataOffset() int {
+	optLen := 0
+	if c.tsEnabled {
+		optLen = 12 // timestamp option
+	}
+	return header.IPv4MinHeaderSize + header.TCPMinHeaderSize + optLen
+}
+
+// sendDataGSO sends a large GSO segment. The payload must already be placed
+// at buf[c.gsoDataOffset():c.gsoDataOffset()+dataLen]. The GSO buffer is
+// handed off to the stack and must not be reused by the caller.
+func (c *TCPConn) sendDataGSO(buf []byte, dataLen int, seq uint32) {
+	var optBuf [12]byte
+	optLen := 0
+	if c.tsEnabled {
+		optLen += header.EncodeTimestampOption(optBuf[optLen:], c.handler.now(), c.tsRecent)
+	}
+
+	tcpHdrSize := header.TCPMinHeaderSize + optLen
+	ipHdrSize := header.IPv4MinHeaderSize
+	totalLen := ipHdrSize + tcpHdrSize + dataLen
+	tcpLen := uint16(tcpHdrSize + dataLen)
+
+	// Build TCP header.
+	tcpBuf := buf[ipHdrSize : ipHdrSize+tcpHdrSize]
+	hdr := header.TCP(tcpBuf)
+	wnd := c.rcv.wnd()
+	hdr.Encode(&header.TCPFields{
+		SrcPort:    c.flow.DstPort,
+		DstPort:    c.flow.SrcPort,
+		SeqNum:     seq,
+		AckNum:     c.rcv.nxt,
+		DataOffset: uint8(tcpHdrSize / 4),
+		Flags:      header.TCPFlagACK,
+		WindowSize: wnd,
+	})
+	if optLen > 0 {
+		copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
+	}
+	setTCPPartialChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, tcpLen)
+
+	opts := channel.PacketOptions{
+		GSOType:    channel.GSOTCPv4,
+		GSOSize:    uint16(c.snd.mss),
+		HdrLen:     uint16(ipHdrSize + tcpHdrSize),
+		CsumStart:  uint16(ipHdrSize),
+		CsumOffset: 16, // TCP checksum field offset within transport header
+	}
+
+	c.handler.stack.SendPacketGSO(buf, 0, totalLen, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber, opts)
 	c.updateTSLastAckSent()
 	c.lastWndZero = (wnd == 0)
 }

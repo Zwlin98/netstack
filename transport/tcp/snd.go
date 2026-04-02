@@ -146,6 +146,24 @@ func (s *sender) sendPending(conn *TCPConn) {
 			break
 		}
 
+		// GSO path: batch multiple MSS worth of data into a single large segment.
+		if conn.handler.gsoWriter != nil && available > s.mss && windowLeft > s.mss {
+			buf := packet.GetGSOBuf()
+			dataOffset := conn.gsoDataOffset()
+			gsoSize := min(windowLeft, available, conn.handler.gsoMaxSize, packet.GSOBufSize-dataOffset)
+			n := conn.writeBuf.ReadNoBlock(buf[dataOffset : dataOffset+gsoSize])
+			if n == 0 {
+				packet.PutGSOBuf(buf)
+				break
+			}
+			// Record at MSS granularity before handing buffer to stack.
+			s.recordSentGSO(s.nxt, buf[dataOffset:dataOffset+n], s.mss)
+			conn.sendDataGSO(buf, n, s.nxt)
+			s.nxt += uint32(n)
+			continue
+		}
+
+		// Non-GSO path: send one MSS-sized segment.
 		segSize := min(min(windowLeft, available), s.mss)
 		ref := packet.GetRefBuf()
 		n := conn.writeBuf.ReadNoBlock(ref.Buf()[:segSize])
@@ -190,6 +208,25 @@ func (s *sender) recordSent(seq uint32, ref *packet.RefBuf) {
 		ref:    ref,
 		sentAt: time.Now(),
 	})
+}
+
+// recordSentGSO splits GSO payload data into MSS-sized RefBufs and records
+// each as an unacked segment for retransmission tracking.
+func (s *sender) recordSentGSO(seq uint32, data []byte, mss int) {
+	now := time.Now()
+	for len(data) > 0 {
+		n := min(len(data), mss)
+		ref := packet.GetRefBuf()
+		copy(ref.Buf()[:n], data[:n])
+		ref.SetLen(n)
+		s.unacked = append(s.unacked, unackedSegment{
+			seq:    seq,
+			ref:    ref,
+			sentAt: now,
+		})
+		seq += uint32(n)
+		data = data[n:]
+	}
 }
 
 // removeAcked removes segments fully acknowledged by ack and measures RTT.

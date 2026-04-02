@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Zwlin98/netstack/channel"
 	"github.com/Zwlin98/netstack/header"
 	"github.com/Zwlin98/netstack/packet"
 	"github.com/Zwlin98/netstack/stack"
@@ -24,6 +25,10 @@ type TCPHandler struct {
 	// Timestamp clock (RFC 7323).
 	tsOffset uint32    // random offset to prevent leaking uptime
 	tsEpoch  time.Time // monotonic reference point
+
+	// GSO support (cached from channel at init time).
+	gsoWriter  channel.GSOWriter // nil when GSO unavailable
+	gsoMaxSize int               // 0 when GSO unavailable
 }
 
 // NewTCPHandler creates a new TCPHandler.
@@ -39,7 +44,7 @@ func NewTCPHandler(s *stack.Stack, opts ...Option) *TCPHandler {
 	if cfg.InitialWriteBufferSize > cfg.WriteBufferSize {
 		cfg.InitialWriteBufferSize = cfg.WriteBufferSize
 	}
-	return &TCPHandler{
+	h := &TCPHandler{
 		conns: make(map[FlowID]*TCPConn),
 		listener: &TCPListener{
 			acceptCh: make(chan *TCPConn, cfg.AcceptQueueSize),
@@ -50,6 +55,11 @@ func NewTCPHandler(s *stack.Stack, opts ...Option) *TCPHandler {
 		tsOffset: generateISN(), // random offset
 		tsEpoch:  time.Now(),
 	}
+	if gw, ok := s.Channel().(channel.GSOWriter); ok && gw.GSOEnabled() {
+		h.gsoWriter = gw
+		h.gsoMaxSize = gw.GSOMaxSize()
+	}
+	return h
 }
 
 // now returns the current TSval for outgoing timestamps.

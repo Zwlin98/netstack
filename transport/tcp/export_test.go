@@ -113,3 +113,13 @@ func ConnReadBufSize(c *TCPConn) int {
 func ConnWriteBufSize(c *TCPConn) int {
 	return c.writeBufSize
 }
+
+// HandlerGSOEnabled returns whether the handler detected GSO support.
+func HandlerGSOEnabled(h *TCPHandler) bool {
+	return h.gsoWriter != nil
+}
+
+// HandlerGSOMaxSize returns the cached GSO max size.
+func HandlerGSOMaxSize(h *TCPHandler) int {
+	return h.gsoMaxSize
+}
