@@ -4,8 +4,12 @@ import (
 	"errors"
 	"os"
 
+	"github.com/Zwlin98/netstack/channel"
 	"golang.org/x/sys/unix"
 )
+
+// Compile-time interface check.
+var _ channel.GSOWriter = (*TUNChannel)(nil)
 
 // TUNChannel adapts a Linux TUN device to the channel.Channel interface.
 // Read path: batch-reads into an internal buffer, returns one packet per ReadPacket call.
@@ -118,4 +122,51 @@ func (c *TUNChannel) MTU() int {
 		return 1500
 	}
 	return mtu
+}
+
+// GSOEnabled reports whether this TUN device supports GSO.
+func (c *TUNChannel) GSOEnabled() bool {
+	return c.tun.vnetHdr
+}
+
+// GSOMaxSize returns the maximum payload size for a GSO segment.
+// Returns 0 when GSO is not supported.
+func (c *TUNChannel) GSOMaxSize() int {
+	if !c.tun.vnetHdr {
+		return 0
+	}
+	return 65535 - 40 // max IP total length minus IPv4+TCP minimum headers
+}
+
+// WritePacketGSO writes an IP packet with GSO/checksum offload metadata.
+// When opts is zero-value (GSOType=GSONone), behavior is identical to WritePacket.
+func (c *TUNChannel) WritePacketGSO(data []byte, opts channel.PacketOptions) error {
+	if len(data) == 0 {
+		return nil
+	}
+
+	if c.tun.vnetHdr {
+		var hdr virtioNetHdr
+		if opts.GSOType != channel.GSONone {
+			hdr.flags = unix.VIRTIO_NET_HDR_F_NEEDS_CSUM
+			hdr.gsoType = opts.GSOType
+			hdr.gsoSize = opts.GSOSize
+			hdr.hdrLen = opts.HdrLen
+			hdr.csumStart = opts.CsumStart
+			hdr.csumOffset = opts.CsumOffset
+		}
+		var hdrBuf [virtioNetHdrLen]byte
+		hdr.encode(hdrBuf[:])
+		_, err := unix.Writev(c.tun.tunFd, [][]byte{hdrBuf[:], data})
+		if errors.Is(err, os.ErrClosed) {
+			return os.ErrClosed
+		}
+		return err
+	}
+
+	_, err := c.tun.tunFile.Write(data)
+	if errors.Is(err, os.ErrClosed) {
+		return os.ErrClosed
+	}
+	return err
 }
