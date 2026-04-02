@@ -87,3 +87,14 @@ func (c *MemoryChannel) Read(timeout time.Duration) []byte {
 		return nil
 	}
 }
+
+// TryRead attempts a non-blocking read from the outbound channel (test helper).
+// Returns nil immediately if no packet is available.
+func (c *MemoryChannel) TryRead() []byte {
+	select {
+	case pkt := <-c.outbound:
+		return pkt
+	default:
+		return nil
+	}
+}
