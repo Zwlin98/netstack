@@ -141,6 +141,11 @@ func (r *receiver) handleData(seq uint32, data []byte) {
 	if seq == r.nxt {
 		// In order: deliver to readBuf. Only advance nxt by bytes actually written.
 		n := r.deliver(data)
+		if n > 0 {
+			if st := r.conn.stats; st != nil {
+				st.PayloadBytesIn.Add(uint64(n))
+			}
+		}
 		r.nxt += uint32(n)
 		// Drain any now-contiguous OOO segments.
 		if n > 0 {
@@ -379,6 +384,11 @@ func (r *receiver) deliverOOO() {
 		}
 
 		n := r.deliver(data)
+		if n > 0 {
+			if st := r.conn.stats; st != nil {
+				st.PayloadBytesIn.Add(uint64(n))
+			}
+		}
 		r.nxt += uint32(n)
 		if n < len(data) {
 			// Partial delivery: retain undelivered bytes for later.

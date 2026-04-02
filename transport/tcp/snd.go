@@ -323,6 +323,9 @@ func (s *sender) handleRTO(conn *TCPConn) {
 		s.unacked[i].sacked = false
 	}
 
+	if st := conn.stats; st != nil {
+		st.Retransmits.Add(1)
+	}
 	s.retransmitOldest(conn)
 }
 
@@ -449,6 +452,9 @@ func (s *sender) handleACK(ack uint32, conn *TCPConn) {
 
 // handleDupACK processes a duplicate ACK for fast retransmit / NewReno.
 func (s *sender) handleDupACK(conn *TCPConn) {
+	if st := conn.stats; st != nil {
+		st.DupACKsIn.Add(1)
+	}
 	s.dupACKCount++
 	if s.inRecovery {
 		// During recovery: inflate cwnd by MSS per dup ACK.
@@ -463,6 +469,9 @@ func (s *sender) handleDupACK(conn *TCPConn) {
 		return
 	}
 	if s.dupACKCount == 3 {
+		if st := conn.stats; st != nil {
+			st.FastRetransmits.Add(1)
+		}
 		// Enter fast recovery (NewReno RFC 5681 / RFC 6582).
 		s.ssthresh = max(s.cwnd/2, 2*uint32(s.mss))
 		s.cwnd = s.ssthresh + 3*uint32(s.mss)

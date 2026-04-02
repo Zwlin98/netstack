@@ -20,6 +20,11 @@ func (c *TCPConn) handleSynRcvd(seg segment) {
 			return
 		}
 		c.state = stateEstablished
+		if st := c.stats; st != nil {
+			st.ActiveConns.Add(1)
+			st.TotalAccepted.Add(1)
+			c.statsActive = true
+		}
 
 		// Cancel SYN_RCVD timeout — handshake completed.
 		if c.synRcvdTimer != nil {

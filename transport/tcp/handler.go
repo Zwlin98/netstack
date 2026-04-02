@@ -29,6 +29,8 @@ type TCPHandler struct {
 	// GSO support (cached from channel at init time).
 	gsoWriter  channel.GSOWriter // nil when GSO unavailable
 	gsoMaxSize int               // 0 when GSO unavailable
+
+	stats *Stats // nil when stats not enabled
 }
 
 // NewTCPHandler creates a new TCPHandler.
@@ -86,6 +88,9 @@ func (h *TCPHandler) HandlePacket(pb *packet.PacketBuffer) {
 	tcpLen := min(ipHdr.TotalLength()-uint16(ipHdr.HeaderLength()), uint16(len(pb.Data)))
 	partial := header.PseudoHeaderChecksum(tcpip.TCPProtocolNumber, ipHdr.SourceAddress(), ipHdr.DestinationAddress(), tcpLen)
 	if header.Checksum(pb.Data[:tcpLen], partial) != 0 {
+		if st := h.stats; st != nil {
+			st.ChecksumErrors.Add(1)
+		}
 		pb.Release()
 		return
 	}
@@ -102,9 +107,15 @@ func (h *TCPHandler) HandlePacket(pb *packet.PacketBuffer) {
 	h.mu.RUnlock()
 
 	if exists {
+		if st := h.stats; st != nil {
+			st.SegmentsIn.Add(1)
+		}
 		select {
 		case conn.inbound <- pb:
 		default:
+			if st := h.stats; st != nil {
+				st.DroppedInbound.Add(1)
+			}
 			pb.Release()
 		}
 		return
@@ -113,16 +124,25 @@ func (h *TCPHandler) HandlePacket(pb *packet.PacketBuffer) {
 	// Only a pure SYN (without ACK) initiates a new connection.
 	// SYN+ACK to a non-existent flow is invalid and falls through to sendRST.
 	if tcpHdr.Flags().Has(header.TCPFlagSYN) && !tcpHdr.Flags().Has(header.TCPFlagACK) {
+		if st := h.stats; st != nil {
+			st.SegmentsIn.Add(1)
+		}
 		h.handleSYN(pb, flow)
 		return
 	}
 
 	// Never send RST in response to RST (RFC 793).
 	if tcpHdr.Flags().Has(header.TCPFlagRST) {
+		if st := h.stats; st != nil {
+			st.ResetsReceived.Add(1)
+		}
 		pb.Release()
 		return
 	}
 
+	if st := h.stats; st != nil {
+		st.ResetsSent.Add(1)
+	}
 	h.sendRST(pb)
 	pb.Release()
 }
@@ -196,6 +216,9 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 
 	// MSS: store peer's MSS from SYN.
 	conn.peerMSS = synOpts.MSS
+
+	// Propagate stats pointer from handler.
+	conn.stats = h.stats
 
 	h.mu.Lock()
 	h.conns[flow] = conn

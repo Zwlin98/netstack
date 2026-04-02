@@ -91,6 +91,9 @@ func (c *TCPConn) sendSYNACK() {
 	})
 	copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
+	if st := c.stats; st != nil {
+		st.SegmentsOut.Add(1)
+	}
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 }
 
@@ -141,6 +144,9 @@ func (c *TCPConn) sendACK() {
 		copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
 	}
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
+	if st := c.stats; st != nil {
+		st.SegmentsOut.Add(1)
+	}
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 	c.updateTSLastAckSent()
 	c.lastWndZero = (wnd == 0)
@@ -174,6 +180,10 @@ func (c *TCPConn) sendData(data []byte, seq uint32) {
 		copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
 	}
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, tcpLen)
+	if st := c.stats; st != nil {
+		st.SegmentsOut.Add(1)
+		st.PayloadBytesOut.Add(uint64(len(data)))
+	}
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 	c.updateTSLastAckSent()
 	c.lastWndZero = (wnd == 0)
@@ -230,6 +240,10 @@ func (c *TCPConn) sendDataGSO(buf []byte, dataLen int, seq uint32) {
 		CsumOffset: 16, // TCP checksum field offset within transport header
 	}
 
+	if st := c.stats; st != nil {
+		st.SegmentsOut.Add(1)
+		st.PayloadBytesOut.Add(uint64(dataLen))
+	}
 	c.handler.stack.SendPacketGSO(buf, 0, totalLen, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber, opts)
 	c.updateTSLastAckSent()
 	c.lastWndZero = (wnd == 0)
@@ -267,6 +281,9 @@ func (c *TCPConn) sendFINSegment(seq uint32) {
 		copy(tcpBuf[header.TCPMinHeaderSize:], optBuf[:optLen])
 	}
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, uint16(hdrSize))
+	if st := c.stats; st != nil {
+		st.SegmentsOut.Add(1)
+	}
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 	c.updateTSLastAckSent()
 }
@@ -285,6 +302,10 @@ func (c *TCPConn) sendRSTSegment(seqNum uint32) {
 		WindowSize: 0,
 	})
 	setTCPChecksum(hdr, c.flow.DstAddr, c.flow.SrcAddr, header.TCPMinHeaderSize)
+	if st := c.stats; st != nil {
+		st.SegmentsOut.Add(1)
+		st.ResetsSent.Add(1)
+	}
 	c.handler.stack.SendPacket(pb, c.flow.DstAddr, c.flow.SrcAddr, tcpip.TCPProtocolNumber)
 }
 
@@ -325,5 +346,8 @@ func (h *TCPHandler) sendRST(pb *packet.PacketBuffer) {
 		WindowSize: 0,
 	})
 	setTCPChecksum(hdr, srcAddr, dstAddr, header.TCPMinHeaderSize)
+	if st := h.stats; st != nil {
+		st.SegmentsOut.Add(1)
+	}
 	h.stack.SendPacket(rstPB, srcAddr, dstAddr, tcpip.TCPProtocolNumber)
 }

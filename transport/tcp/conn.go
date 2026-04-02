@@ -94,6 +94,14 @@ type TCPConn struct {
 	// SYN_RCVD timer: close half-open connections that never complete handshake.
 	synRcvdTimer *time.Timer
 
+	// Stats (nil when disabled).
+	stats       *Stats
+	statsActive bool // true if this conn was counted in ActiveConns
+
+	// Per-connection snapshot (mutex-protected for race-free reads).
+	snapshotMu   sync.Mutex
+	snapshotData ConnSnapshot
+
 	// Config snapshots (set at creation, immutable for connection lifetime).
 	keepaliveIdle     time.Duration
 	keepaliveInterval time.Duration
@@ -112,6 +120,35 @@ type TCPConn struct {
 	maxReadBufSize    int
 	readBufSize       int // target ReadBufferSize for lazy growth
 	writeBufSize      int // target WriteBufferSize for lazy growth
+}
+
+// updateSnapshot updates the mutex-protected snapshot data.
+// Called from conn.run() at key state-change points.
+func (c *TCPConn) updateSnapshot() {
+	snap := ConnSnapshot{
+		Flow:        c.flow,
+		State:       c.state.String(),
+		ReadBufUsed: c.readBuf.Len(),
+		WriteBufUsed: c.writeBuf.Len(),
+		BufCap:      c.readBuf.Cap(),
+	}
+	if c.snd != nil {
+		snap.SRTT = c.snd.srtt
+		snap.RTO = c.snd.rto
+		snap.Cwnd = c.snd.cwnd
+		snap.SSThresh = c.snd.ssthresh
+		snap.SndWnd = c.snd.wnd
+		snap.Unacked = len(c.snd.unacked)
+		snap.Retries = c.snd.retries
+		snap.InRecovery = c.snd.inRecovery
+	}
+	if c.rcv != nil {
+		snap.RcvWnd = c.rcv.wnd()
+		snap.OOO = len(c.rcv.ooo)
+	}
+	c.snapshotMu.Lock()
+	c.snapshotData = snap
+	c.snapshotMu.Unlock()
 }
 
 // SetNoDelay enables or disables the Nagle algorithm.
@@ -274,6 +311,9 @@ func (c *TCPConn) cancelZeroWindowProbe() {
 
 // sendZeroWindowProbe sends a 1-byte data probe to elicit a window update.
 func (c *TCPConn) sendZeroWindowProbe() {
+	if st := c.stats; st != nil {
+		st.ZeroWindowProbes.Add(1)
+	}
 	if c.snd == nil || c.writeBuf == nil {
 		return
 	}
@@ -334,6 +374,9 @@ func (c *TCPConn) resetKeepalive() {
 }
 
 func (c *TCPConn) handleRST() {
+	if st := c.stats; st != nil {
+		st.ResetsReceived.Add(1)
+	}
 	c.state = stateClosed
 	c.closeDone()
 }
@@ -392,6 +435,9 @@ func (c *TCPConn) run() {
 		case pb := <-c.inbound:
 			c.handleSegment(pb)
 			pb.Release()
+			if c.stats != nil {
+				c.updateSnapshot()
+			}
 			// After processing a segment, manage the RTO timer.
 			if c.snd != nil {
 				if c.snd.hasUnacked() {
@@ -416,6 +462,9 @@ func (c *TCPConn) run() {
 		case <-rtoTimer.C:
 			if c.snd != nil {
 				c.snd.handleRTO(c)
+				if c.stats != nil {
+					c.updateSnapshot()
+				}
 				if c.state != stateClosed && c.snd.hasUnacked() {
 					rtoTimer.Reset(c.snd.rto)
 				}
@@ -447,6 +496,10 @@ func (c *TCPConn) run() {
 				}
 				c.keepaliveProbes++
 				if c.keepaliveProbes > c.keepaliveCount {
+					if st := c.stats; st != nil {
+						st.TimeoutKeepalive.Add(1)
+						st.TotalReset.Add(1)
+					}
 					// Dead peer detected — abort with RST.
 					c.sendRSTSegment(c.snd.nxt)
 					c.closeDone()
@@ -461,6 +514,9 @@ func (c *TCPConn) run() {
 		case <-c.writeNotify:
 			if c.snd != nil {
 				c.snd.sendPending(c)
+				if c.stats != nil {
+					c.updateSnapshot()
+				}
 				c.resetKeepalive() // sending data resets keepalive
 				// Check if sender is blocked on zero window.
 				c.checkZeroWindow()
@@ -501,6 +557,9 @@ func (c *TCPConn) run() {
 		case <-c.synRcvdTimer.C:
 			// SYN_RCVD timeout — client never completed handshake.
 			if c.state == stateSynRcvd {
+				if st := c.stats; st != nil {
+					st.TimeoutSynRcvd.Add(1)
+				}
 				c.closeDone()
 				return
 			}
@@ -508,6 +567,9 @@ func (c *TCPConn) run() {
 		case <-c.finWait2Timer.C:
 			// FIN_WAIT_2 timeout — peer never sent FIN. Close connection.
 			if c.state == stateFinWait2 {
+				if st := c.stats; st != nil {
+					st.TimeoutFinWait2.Add(1)
+				}
 				c.closeDone()
 				return
 			}
@@ -574,6 +636,9 @@ func (c *TCPConn) enterTimeWait() {
 
 // abort sends RST and closes the connection (used when max retries exceeded).
 func (c *TCPConn) abort() {
+	if st := c.stats; st != nil {
+		st.TotalReset.Add(1)
+	}
 	if c.snd != nil {
 		c.sendRSTSegment(c.snd.nxt)
 	}
@@ -596,6 +661,9 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 	// PAWS check (RFC 7323 §5): drop segment with stale timestamp.
 	if c.tsEnabled && seg.hasTS && !seg.flags.Has(header.TCPFlagRST) {
 		if int32(seg.tsVal-c.tsRecent) < 0 {
+			if st := c.stats; st != nil {
+				st.PAWSDrops.Add(1)
+			}
 			// Stale timestamp — drop silently (no ACK).
 			return
 		}
@@ -669,6 +737,12 @@ func (c *TCPConn) handleSegment(pb *packet.PacketBuffer) {
 }
 
 func (c *TCPConn) cleanup() {
+	if st := c.stats; st != nil {
+		st.TotalClosed.Add(1)
+		if c.statsActive {
+			st.ActiveConns.Add(-1)
+		}
+	}
 	c.handler.removeConn(c.flow)
 	for {
 		select {
