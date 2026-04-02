@@ -239,8 +239,6 @@ stateDiagram-v2
 - **IPv4-only** — 不支持 IPv6
 - **服务端 TCP** — 支持 Listen/Accept，不支持主动 Dial
 - **TUN 网关** — 面向内网设备，client→gateway 存在真实网络 RTT
-- **gVisor 风格** — `[]byte` 命名类型作为协议头视图，零分配解析
-
 ## 测试
 
 ### 单元测试
@@ -248,8 +246,6 @@ stateDiagram-v2
 ```bash
 go test ./...
 ```
-
-TCP 测试包含从 [gVisor](https://github.com/google/gvisor) 移植的工业级测试用例，覆盖握手边界条件、拥塞控制、连接关闭和 RFC 合规性。
 
 ### 集成测试
 
@@ -283,3 +279,7 @@ sudo ./test/run_all.sh test/01_icmp.sh test/02_tcp_echo.sh
 | `16_half_close.sh` | 半关闭（单向 shutdown） |
 | `17_abrupt_disconnect.sh` | 异常断开（RST 处理） |
 | `18_gso_verify.sh` | GSO 分段验证（strace writev 追踪） |
+
+## 致谢
+
+本项目的设计灵感来自 [gVisor](https://github.com/google/gvisor) 的用户态网络栈实现。
