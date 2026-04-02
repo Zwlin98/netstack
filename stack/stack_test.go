@@ -338,3 +338,14 @@ func TestSendPacket(t *testing.T) {
 		t.Error("UDP payload mismatch")
 	}
 }
+
+func TestNewPanicsOnOversizedMTU(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for MTU > 1500, got none")
+		}
+	}()
+	ch := channel.NewMemory(9000)
+	New(ch)
+}

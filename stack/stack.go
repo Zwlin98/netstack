@@ -1,6 +1,7 @@
 package stack
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/Zwlin98/netstack/channel"
@@ -8,6 +9,8 @@ import (
 	"github.com/Zwlin98/netstack/packet"
 	"github.com/Zwlin98/netstack/tcpip"
 )
+
+const maxSupportedMTU = 1500
 
 // TransportHandler receives dispatched packets from the network layer.
 type TransportHandler interface {
@@ -29,7 +32,12 @@ type Stack struct {
 }
 
 // New creates a new Stack using the given Channel.
+// Panics if the channel's MTU exceeds 1500, which is the maximum supported
+// by the internal packet buffer pools.
 func New(ch channel.Channel, opts ...Option) *Stack {
+	if mtu := ch.MTU(); mtu > maxSupportedMTU {
+		panic(fmt.Sprintf("channel MTU %d exceeds maximum supported MTU %d", mtu, maxSupportedMTU))
+	}
 	cfg := defaultConfig
 	for _, o := range opts {
 		o(&cfg)
