@@ -124,15 +124,19 @@ func (r *ipv4Reassembler) process(pb *packet.PacketBuffer, ipHdr header.IPv4) (*
 	})
 	set.mem += payloadLen
 	r.mem += payloadLen
-	r.trimMemoryLocked()
 
-	if set.totalLen < 0 || set.header == nil || !set.complete() {
+	if set.totalLen >= 0 && set.header != nil && set.complete() {
+		complete := set.assemble()
+		r.releaseSetLocked(key, set)
+		return complete, true
+	}
+
+	r.trimMemoryLocked()
+	if r.sets[key] != set {
 		return nil, false
 	}
 
-	complete := set.assemble()
-	r.releaseSetLocked(key, set)
-	return complete, true
+	return nil, false
 }
 
 func (s *ipv4FragmentSet) complete() bool {

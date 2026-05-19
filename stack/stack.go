@@ -182,6 +182,11 @@ func (s *Stack) readLoop() {
 			continue
 		}
 
+		if st := s.stats; st != nil {
+			st.PacketsIn.Add(1)
+			st.BytesIn.Add(uint64(totalLen))
+		}
+
 		pb.NetworkHeader = raw[:hdrLen]
 		pb.Data = raw[hdrLen:]
 
@@ -198,17 +203,9 @@ func (s *Stack) readLoop() {
 
 		switch proto {
 		case tcpip.ICMPv4ProtocolNumber:
-			if st := s.stats; st != nil {
-				st.PacketsIn.Add(1)
-				st.BytesIn.Add(uint64(n))
-			}
 			s.handleICMP(pb, ipHdr)
 		default:
 			if h, ok := s.handlers[proto]; ok {
-				if st := s.stats; st != nil {
-					st.PacketsIn.Add(1)
-					st.BytesIn.Add(uint64(n))
-				}
 				h.HandlePacket(pb)
 			} else {
 				if st := s.stats; st != nil {

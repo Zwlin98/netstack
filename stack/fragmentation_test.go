@@ -220,6 +220,103 @@ func TestIPv4FragmentReassemblyRejectsMisalignedNonFinalFragment(t *testing.T) {
 	}
 }
 
+func TestIPv4FragmentReassemblyAssemblesBeforeMemoryTrim(t *testing.T) {
+	r := newIPv4Reassembler()
+
+	src := tcpip.From4(10, 0, 0, 1)
+	dst := tcpip.From4(30, 1, 2, 3)
+	payload := make([]byte, 34768)
+	udp := buildUDPDatagram(12345, 443, src, dst, payload)
+
+	firstLen := 32768
+	first := buildIPv4Fragment(src, dst, 0x5858, tcpip.UDPProtocolNumber, 0, true, udp[:firstLen])
+	firstHdr := header.IPv4(first)
+	key := ipv4FragmentKey{
+		src:   src,
+		dst:   dst,
+		id:    firstHdr.ID(),
+		proto: firstHdr.Protocol(),
+	}
+	fillerKey := ipv4FragmentKey{
+		src:   tcpip.From4(10, 0, 0, 2),
+		dst:   dst,
+		id:    0x9999,
+		proto: tcpip.UDPProtocolNumber,
+	}
+	fillerMem := ipv4ReassemblyHighThreshold - firstLen - 1000
+	r.sets[key] = &ipv4FragmentSet{
+		createdAt: time.Now().Add(-time.Second),
+		header:    append([]byte(nil), first[:header.IPv4MinHeaderSize]...),
+		fragments: []ipv4Fragment{{
+			offset: 0,
+			data:   append([]byte(nil), udp[:firstLen]...),
+		}},
+		totalLen: -1,
+		mem:      firstLen,
+	}
+	r.sets[fillerKey] = &ipv4FragmentSet{
+		createdAt: time.Now(),
+		totalLen:  -1,
+		mem:       fillerMem,
+	}
+	r.mem = firstLen + fillerMem
+
+	final := buildIPv4Fragment(src, dst, 0x5858, tcpip.UDPProtocolNumber, firstLen, false, udp[firstLen:])
+	pb := packet.NewPacketBufferWithData(final)
+	pb.NetworkHeader = pb.Buf()[:header.IPv4MinHeaderSize]
+	pb.Data = pb.Buf()[header.IPv4MinHeaderSize:]
+
+	complete, ok := r.process(pb, header.IPv4(final))
+	if !ok {
+		t.Fatal("expected datagram to complete before memory trimming")
+	}
+	defer complete.Release()
+	if r.mem != fillerMem {
+		t.Fatalf("memory accounting after completing current set = %d, want %d", r.mem, fillerMem)
+	}
+	if _, ok := r.sets[key]; ok {
+		t.Fatal("completed fragment set was not released")
+	}
+	if string(complete.Data) != string(udp) {
+		t.Fatalf("reassembled payload mismatch: got %d bytes want %d", len(complete.Data), len(udp))
+	}
+}
+
+func TestIPv4FragmentStatsCountWireFragments(t *testing.T) {
+	ch := channel.NewMemory(1500)
+	s := New(ch)
+	stats := s.EnableStats()
+	h := &captureHandler{ch: make(chan []byte, 1)}
+	s.RegisterHandler(tcpip.UDPProtocolNumber, h)
+	s.Start()
+	defer s.Stop()
+
+	src := tcpip.From4(10, 0, 0, 1)
+	dst := tcpip.From4(30, 1, 2, 3)
+	payload := make([]byte, 2000)
+	udp := buildUDPDatagram(12345, 443, src, dst, payload)
+
+	firstLen := 1480
+	first := buildIPv4Fragment(src, dst, 0x5959, tcpip.UDPProtocolNumber, 0, true, udp[:firstLen])
+	second := buildIPv4Fragment(src, dst, 0x5959, tcpip.UDPProtocolNumber, firstLen, false, udp[firstLen:])
+
+	ch.Inject(first)
+	ch.Inject(second)
+
+	select {
+	case <-h.ch:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reassembled datagram")
+	}
+	if got := stats.PacketsIn.Load(); got != 2 {
+		t.Fatalf("PacketsIn = %d, want 2 fragments", got)
+	}
+	wantBytes := uint64(len(first) + len(second))
+	if got := stats.BytesIn.Load(); got != wantBytes {
+		t.Fatalf("BytesIn = %d, want %d fragment bytes", got, wantBytes)
+	}
+}
+
 func TestIPv4TotalLengthTrimsTrailingBytes(t *testing.T) {
 	payload := []byte{1, 2, 3, 4}
 	pkt := buildIPv4Packet(tcpip.From4(1, 1, 1, 1), tcpip.From4(2, 2, 2, 2), tcpip.TransportProtocolNumber(99), payload)
