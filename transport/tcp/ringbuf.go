@@ -19,7 +19,7 @@ type ringBuffer struct {
 	mu       sync.Mutex
 	notEmpty chan struct{} // signaled (closed+re-created) when data is written
 	notFull  chan struct{} // signaled (closed+re-created) when data is read
-	closed   bool         // CloseWrite sets this
+	closed   bool          // CloseWrite sets this
 }
 
 func newRingBuffer(size int) *ringBuffer {
@@ -32,7 +32,10 @@ func newRingBuffer(size int) *ringBuffer {
 
 // Cap returns the total buffer capacity.
 func (rb *ringBuffer) Cap() int {
-	return len(rb.buf)
+	rb.mu.Lock()
+	n := len(rb.buf)
+	rb.mu.Unlock()
+	return n
 }
 
 // Len returns the number of bytes available for reading.
