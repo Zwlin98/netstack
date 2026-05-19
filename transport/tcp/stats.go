@@ -9,29 +9,29 @@ import (
 // All fields are safe for concurrent reads via atomic loads.
 type Stats struct {
 	// Connection lifecycle
-	ActiveConns  atomic.Int64
+	ActiveConns   atomic.Int64
 	TotalAccepted atomic.Uint64
 	TotalClosed   atomic.Uint64
 	TotalReset    atomic.Uint64
 
 	// Traffic
-	SegmentsIn     atomic.Uint64
-	SegmentsOut    atomic.Uint64
-	PayloadBytesIn atomic.Uint64
+	SegmentsIn      atomic.Uint64
+	SegmentsOut     atomic.Uint64
+	PayloadBytesIn  atomic.Uint64
 	PayloadBytesOut atomic.Uint64
 
 	// Errors and loss
-	ChecksumErrors atomic.Uint64
-	DroppedInbound atomic.Uint64
-	Retransmits    atomic.Uint64
+	ChecksumErrors  atomic.Uint64
+	DroppedInbound  atomic.Uint64
+	Retransmits     atomic.Uint64
 	FastRetransmits atomic.Uint64
-	DupACKsIn      atomic.Uint64
+	DupACKsIn       atomic.Uint64
 
 	// Protocol events
-	ResetsSent      atomic.Uint64
-	ResetsReceived  atomic.Uint64
+	ResetsSent       atomic.Uint64
+	ResetsReceived   atomic.Uint64
 	ZeroWindowProbes atomic.Uint64
-	PAWSDrops       atomic.Uint64
+	PAWSDrops        atomic.Uint64
 
 	// Timeouts
 	TimeoutKeepalive atomic.Uint64
@@ -56,12 +56,18 @@ type ConnSnapshot struct {
 	Cwnd         uint32
 	SSThresh     uint32
 	SndWnd       uint32
+	SndNxt       uint32
+	SndMSS       int
+	SndMaxWnd    uint32
 	RcvWnd       uint16
 	Unacked      int
 	OOO          int
 	ReadBufUsed  int
 	WriteBufUsed int
-	BufCap       int
+	BufCap       int // Deprecated: use ReadBufCap.
+	ReadBufCap   int
+	WriteBufCap  int
+	DSACKSeen    bool
 	Retries      int
 	InRecovery   bool
 }
