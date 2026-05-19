@@ -41,6 +41,7 @@ var pool = sync.Pool{
 func NewPacketBuffer(headroom int) *PacketBuffer {
 	pb := pool.Get().(*PacketBuffer)
 	pb.reset(headroom)
+	pb.ensureCapacity(headroom)
 	return pb
 }
 
@@ -50,6 +51,7 @@ func NewPacketBuffer(headroom int) *PacketBuffer {
 func NewPacketBufferWithData(data []byte) *PacketBuffer {
 	pb := pool.Get().(*PacketBuffer)
 	pb.reset(0)
+	pb.ensureCapacity(len(data))
 	n := copy(pb.buf, data)
 	pb.Data = pb.buf[:n]
 	return pb
@@ -96,6 +98,9 @@ func (pb *PacketBuffer) Release() {
 	pb.Data = nil
 	pb.headroom = 0
 	pb.consumed = 0
+	if cap(pb.buf) > MaxPacketSize {
+		pb.buf = make([]byte, MaxPacketSize)
+	}
 	pool.Put(pb)
 }
 
@@ -105,4 +110,10 @@ func (pb *PacketBuffer) reset(headroom int) {
 	pb.NetworkHeader = nil
 	pb.TransportHeader = nil
 	pb.Data = nil
+}
+
+func (pb *PacketBuffer) ensureCapacity(size int) {
+	if len(pb.buf) < size {
+		pb.buf = make([]byte, size)
+	}
 }
