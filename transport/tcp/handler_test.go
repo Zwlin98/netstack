@@ -473,6 +473,25 @@ func TestRSTAbortsSynRcvd(t *testing.T) {
 	}
 }
 
+func TestHandlerCloseRejectsNewSYN(t *testing.T) {
+	ch, s, h := setupStack(t)
+	defer s.Stop()
+
+	clientAddr := tcpip.From4(10, 0, 0, 1)
+	serverAddr := tcpip.From4(10, 0, 0, 2)
+	clientISN := uint32(1000)
+
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	syn := buildTCPPacket(clientAddr, serverAddr, 12345, 80, header.TCPFlagSYN, clientISN, 0)
+	ch.Inject(syn)
+	if raw := ch.Read(100 * time.Millisecond); raw != nil {
+		t.Fatalf("closed handler emitted packet for new SYN: %d bytes", len(raw))
+	}
+}
+
 // TestInvalidACKInSynRcvd is superseded by TestAcceptableAckInSynRcvd
 // (ported from gVisor) which tests offset=0/1/2 in a table-driven style.
 

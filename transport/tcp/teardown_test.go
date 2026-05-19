@@ -103,6 +103,28 @@ func TestGracefulClose_FullLifecycle(t *testing.T) {
 	}
 }
 
+func TestForceClosePreventsWritesAfterReturn(t *testing.T) {
+	ch, s, h := setupStack(t)
+	defer s.Stop()
+	defer h.Close()
+
+	clientAddr := tcpip.From4(10, 0, 0, 1)
+	serverAddr := tcpip.From4(10, 0, 0, 2)
+	clientPort := uint16(50199)
+	serverPort := uint16(80)
+	clientISN := uint32(5500)
+
+	_, conn := completeHandshake(t, ch, h, clientAddr, serverAddr, clientPort, serverPort, clientISN)
+
+	if err := conn.ForceClose(); err != nil {
+		t.Fatalf("ForceClose error: %v", err)
+	}
+	n, err := conn.Write([]byte("after close"))
+	if err == nil {
+		t.Fatalf("Write after ForceClose returned n=%d, err=nil", n)
+	}
+}
+
 // TestGracefulClose_PeerInitiated tests peer-initiated close:
 // peer sends FIN → Read returns EOF → app calls Close() → LAST_ACK → CLOSED.
 func TestGracefulClose_PeerInitiated(t *testing.T) {
@@ -232,6 +254,17 @@ func TestGracefulClose_TimeWaitExpiry(t *testing.T) {
 	// Connection should now be removed.
 	if n := tcp.ConnTableLen(h); n != 0 {
 		t.Errorf("connTable = %d after TIME_WAIT, want 0", n)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_ = conn.ForceClose()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("ForceClose blocked after TIME_WAIT expiry")
 	}
 
 	_ = serverISN

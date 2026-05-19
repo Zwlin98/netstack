@@ -12,7 +12,6 @@ import (
 	"github.com/Zwlin98/netstack/tcpip"
 )
 
-
 // TCPConn represents a single TCP connection.
 type TCPConn struct {
 	flow    FlowID
@@ -47,8 +46,8 @@ type TCPConn struct {
 	unackedSegs     int         // data segments received since last ACK sent
 
 	// Zero Window Probe (RFC 793 / RFC 1122).
-	zeroWindowTimer   *time.Timer  // fires to send zero-window probe
-	zeroWindowProbing bool         // currently in zero-window probe mode
+	zeroWindowTimer   *time.Timer   // fires to send zero-window probe
+	zeroWindowProbing bool          // currently in zero-window probe mode
 	probeInterval     time.Duration // current probe interval (doubles on each probe)
 
 	// TCP Keepalive (RFC 1122 Section 4.2.3.6).
@@ -77,13 +76,16 @@ type TCPConn struct {
 
 	inbound chan *packet.PacketBuffer
 
-	done          chan struct{}
-	closeOnce     sync.Once // guards graceful Close (FIN)
-	closeReadOnce sync.Once // guards CloseRead
-	doneOnce      sync.Once // guards close(done)
+	done           chan struct{}
+	closeOnce      sync.Once // guards graceful Close (FIN)
+	closeReadOnce  sync.Once // guards CloseRead
+	doneOnce       sync.Once // guards close(done)
+	forceCloseOnce sync.Once // guards forceCloseCh
 
 	// Graceful close: app signals run loop via closeCh.
 	closeCh chan struct{}
+	// Force close: external callers ask run loop to abort without racing state.
+	forceCloseCh chan struct{}
 
 	// TIME_WAIT timer, managed within run loop.
 	timeWaitTimer *time.Timer
@@ -126,11 +128,13 @@ type TCPConn struct {
 // Called from conn.run() at key state-change points.
 func (c *TCPConn) updateSnapshot() {
 	snap := ConnSnapshot{
-		Flow:        c.flow,
-		State:       c.state.String(),
-		ReadBufUsed: c.readBuf.Len(),
+		Flow:         c.flow,
+		State:        c.state.String(),
+		ReadBufUsed:  c.readBuf.Len(),
 		WriteBufUsed: c.writeBuf.Len(),
-		BufCap:      c.readBuf.Cap(),
+		BufCap:       c.readBuf.Cap(),
+		ReadBufCap:   c.readBuf.Cap(),
+		WriteBufCap:  c.writeBuf.Cap(),
 	}
 	if c.snd != nil {
 		snap.SRTT = c.snd.srtt
@@ -138,9 +142,13 @@ func (c *TCPConn) updateSnapshot() {
 		snap.Cwnd = c.snd.cwnd
 		snap.SSThresh = c.snd.ssthresh
 		snap.SndWnd = c.snd.wnd
+		snap.SndNxt = c.snd.nxt
+		snap.SndMSS = c.snd.mss
+		snap.SndMaxWnd = c.snd.maxWnd
 		snap.Unacked = len(c.snd.unacked)
 		snap.Retries = c.snd.retries
 		snap.InRecovery = c.snd.inRecovery
+		snap.DSACKSeen = c.snd.dsackSeen
 	}
 	if c.rcv != nil {
 		snap.RcvWnd = c.rcv.wnd()
@@ -248,12 +256,20 @@ func (c *TCPConn) Close() {
 
 // ForceClose sends RST and tears down the connection immediately.
 func (c *TCPConn) ForceClose() error {
+	c.forceCloseOnce.Do(func() {
+		close(c.forceCloseCh)
+	})
+	<-c.done
+	return nil
+}
+
+func (c *TCPConn) forceCloseFromRun() {
 	if c.state == stateEstablished && c.snd != nil {
 		c.sendRSTSegment(c.snd.nxt)
 	}
+	c.writeBuf.CloseWrite()
+	c.readBuf.CloseWrite()
 	c.closeDone()
-	c.handler.removeConn(c.flow)
-	return nil
 }
 
 // sendFIN sends a FIN+ACK and records it for retransmission.
@@ -383,6 +399,7 @@ func (c *TCPConn) handleRST() {
 
 func (c *TCPConn) run() {
 	defer c.cleanup()
+	defer c.closeDone()
 
 	rtoTimer := time.NewTimer(0)
 	if !rtoTimer.Stop() {
@@ -429,15 +446,14 @@ func (c *TCPConn) run() {
 	if c.state == stateSynRcvd {
 		c.synRcvdTimer.Reset(c.synRcvdTimeout)
 	}
+	c.updateSnapshot()
 
 	for {
 		select {
 		case pb := <-c.inbound:
 			c.handleSegment(pb)
 			pb.Release()
-			if c.stats != nil {
-				c.updateSnapshot()
-			}
+			c.updateSnapshot()
 			// After processing a segment, manage the RTO timer.
 			if c.snd != nil {
 				if c.snd.hasUnacked() {
@@ -462,9 +478,7 @@ func (c *TCPConn) run() {
 		case <-rtoTimer.C:
 			if c.snd != nil {
 				c.snd.handleRTO(c)
-				if c.stats != nil {
-					c.updateSnapshot()
-				}
+				c.updateSnapshot()
 				if c.state != stateClosed && c.snd.hasUnacked() {
 					rtoTimer.Reset(c.snd.rto)
 				}
@@ -503,7 +517,7 @@ func (c *TCPConn) run() {
 					// Dead peer detected — abort with RST.
 					c.sendRSTSegment(c.snd.nxt)
 					c.closeDone()
-					c.handler.removeConn(c.flow)
+					c.updateSnapshot()
 					return
 				}
 				// Send keepalive probe: seq = snd.una - 1, no data, ACK flag.
@@ -514,9 +528,7 @@ func (c *TCPConn) run() {
 		case <-c.writeNotify:
 			if c.snd != nil {
 				c.snd.sendPending(c)
-				if c.stats != nil {
-					c.updateSnapshot()
-				}
+				c.updateSnapshot()
 				c.resetKeepalive() // sending data resets keepalive
 				// Check if sender is blocked on zero window.
 				c.checkZeroWindow()
@@ -550,9 +562,15 @@ func (c *TCPConn) run() {
 
 		case <-c.closeCh:
 			c.handleClose()
+			c.updateSnapshot()
 			if c.snd != nil && c.snd.hasUnacked() {
 				rtoTimer.Reset(c.snd.rto)
 			}
+
+		case <-c.forceCloseCh:
+			c.forceCloseFromRun()
+			c.updateSnapshot()
+			return
 
 		case <-c.synRcvdTimer.C:
 			// SYN_RCVD timeout — client never completed handshake.
@@ -561,6 +579,7 @@ func (c *TCPConn) run() {
 					st.TimeoutSynRcvd.Add(1)
 				}
 				c.closeDone()
+				c.updateSnapshot()
 				return
 			}
 
@@ -571,6 +590,7 @@ func (c *TCPConn) run() {
 					st.TimeoutFinWait2.Add(1)
 				}
 				c.closeDone()
+				c.updateSnapshot()
 				return
 			}
 

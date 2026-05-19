@@ -19,6 +19,7 @@ type TCPHandler struct {
 	listener *TCPListener
 	stack    *stack.Stack
 	cfg      Config
+	closed   bool
 
 	wg sync.WaitGroup
 
@@ -103,6 +104,11 @@ func (h *TCPHandler) HandlePacket(pb *packet.PacketBuffer) {
 	}
 
 	h.mu.RLock()
+	if h.closed {
+		h.mu.RUnlock()
+		pb.Release()
+		return
+	}
 	conn, exists := h.conns[flow]
 	h.mu.RUnlock()
 
@@ -160,18 +166,19 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 	writeBuf := newRingBuffer(cfg.InitialWriteBufferSize)
 
 	conn := &TCPConn{
-		flow:        flow,
-		handler:     h,
-		state:       stateSynRcvd,
-		irs:         irs,
-		iss:         iss,
-		readBuf:     readBuf,
-		writeBuf:    writeBuf,
+		flow:         flow,
+		handler:      h,
+		state:        stateSynRcvd,
+		irs:          irs,
+		iss:          iss,
+		readBuf:      readBuf,
+		writeBuf:     writeBuf,
 		writeNotify:  make(chan struct{}, 1),
 		windowNotify: make(chan struct{}, 1),
-		inbound:     make(chan *packet.PacketBuffer, cfg.InboundQueueSize),
-		done:        make(chan struct{}),
-		closeCh:     make(chan struct{}, 1),
+		inbound:      make(chan *packet.PacketBuffer, cfg.InboundQueueSize),
+		done:         make(chan struct{}),
+		closeCh:      make(chan struct{}, 1),
+		forceCloseCh: make(chan struct{}),
 
 		// Config snapshot.
 		keepaliveIdle:     cfg.KeepaliveIdle,
@@ -220,15 +227,20 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 	// Propagate stats pointer from handler.
 	conn.stats = h.stats
 
+	conn.updateSnapshot()
+
 	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		pb.Release()
+		return
+	}
 	h.conns[flow] = conn
-	h.mu.Unlock()
-
-	conn.sendSYNACK()
-
 	h.wg.Go(func() {
 		conn.run()
 	})
+	conn.sendSYNACK()
+	h.mu.Unlock()
 
 	pb.Release()
 }
@@ -244,6 +256,7 @@ func (h *TCPHandler) Close() error {
 	h.listener.Close()
 
 	h.mu.Lock()
+	h.closed = true
 	conns := make([]*TCPConn, 0, len(h.conns))
 	for _, c := range h.conns {
 		conns = append(conns, c)

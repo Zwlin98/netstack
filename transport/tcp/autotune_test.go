@@ -47,7 +47,8 @@ func TestAutoTune_GrowthTrigger(t *testing.T) {
 	ack := buildTCPPacketWithData(clientAddr, serverAddr, clientPort, serverPort,
 		header.TCPFlagACK, clientISN+1, dataEnd, 65535, nil)
 	ch.Inject(ack)
-	time.Sleep(50 * time.Millisecond) // let RTT measurement propagate
+	waitForSRTT(t, conn)
+	tcp.SetSenderSRTT(conn, 50*time.Millisecond)
 
 	// Start a goroutine to continuously drain the read buffer.
 	var totalRead atomic.Int64
@@ -94,7 +95,27 @@ func TestAutoTune_GrowthTrigger(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	deadline := time.Now().Add(3 * time.Second)
 	newCap := tcp.ReadBufCap(conn)
+	for newCap <= initialCap && time.Now().Before(deadline) {
+		// autoTuneCheck runs on packet delivery after an SRTT window has
+		// elapsed, so send a small trigger burst instead of relying on sleeps.
+		for i := 0; i < 4; i++ {
+			chunk := make([]byte, 512)
+			pkt := buildTCPPacketWithData(clientAddr, serverAddr, clientPort, serverPort,
+				header.TCPFlagACK, clientSeq, dataEnd, 65535, chunk)
+			ch.Inject(pkt)
+			clientSeq += 512
+		}
+		for {
+			r := ch.Read(50 * time.Millisecond)
+			if r == nil {
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+		newCap = tcp.ReadBufCap(conn)
+	}
 	if newCap <= initialCap {
 		t.Errorf("buffer should have grown: cap=%d, initial=%d", newCap, initialCap)
 	}
@@ -102,6 +123,17 @@ func TestAutoTune_GrowthTrigger(t *testing.T) {
 		t.Errorf("buffer exceeded max: cap=%d, max=%d", newCap, maxBuf)
 	}
 	_ = serverISN
+}
+
+func waitForSRTT(t *testing.T, conn *tcp.TCPConn) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for tcp.SenderSRTT(conn) <= 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if tcp.SenderSRTT(conn) <= 0 {
+		t.Fatal("timed out waiting for RTT measurement")
+	}
 }
 
 // TestAutoTune_MaxCap verifies that buffer growth respects the configured max.
@@ -135,7 +167,8 @@ func TestAutoTune_MaxCap(t *testing.T) {
 	ack := buildTCPPacketWithData(clientAddr, serverAddr, clientPort, serverPort,
 		header.TCPFlagACK, clientISN+1, dataEnd, 65535, nil)
 	ch.Inject(ack)
-	time.Sleep(50 * time.Millisecond)
+	waitForSRTT(t, conn)
+	tcp.SetSenderSRTT(conn, 50*time.Millisecond)
 
 	// Continuous reader to prevent buffer saturation.
 	stopReader := make(chan struct{})
@@ -213,7 +246,8 @@ func TestAutoTune_NoGrowthOnLowUtilization(t *testing.T) {
 	ack := buildTCPPacketWithData(clientAddr, serverAddr, clientPort, serverPort,
 		header.TCPFlagACK, clientISN+1, dataEnd, 65535, nil)
 	ch.Inject(ack)
-	time.Sleep(50 * time.Millisecond)
+	waitForSRTT(t, conn)
+	tcp.SetSenderSRTT(conn, 50*time.Millisecond)
 
 	// Send only a small amount of data (< 50% of 4096 = 2048) per window.
 	clientSeq := clientISN + 1
