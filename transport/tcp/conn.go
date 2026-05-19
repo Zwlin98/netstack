@@ -399,6 +399,7 @@ func (c *TCPConn) handleRST() {
 
 func (c *TCPConn) run() {
 	defer c.cleanup()
+	defer c.closeDone()
 
 	rtoTimer := time.NewTimer(0)
 	if !rtoTimer.Stop() {

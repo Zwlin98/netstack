@@ -256,6 +256,17 @@ func TestGracefulClose_TimeWaitExpiry(t *testing.T) {
 		t.Errorf("connTable = %d after TIME_WAIT, want 0", n)
 	}
 
+	done := make(chan struct{})
+	go func() {
+		_ = conn.ForceClose()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("ForceClose blocked after TIME_WAIT expiry")
+	}
+
 	_ = serverISN
 }
 
