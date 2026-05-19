@@ -239,9 +239,9 @@ func (h *TCPHandler) handleSYN(pb *packet.PacketBuffer, flow FlowID) {
 	h.wg.Go(func() {
 		conn.run()
 	})
+	conn.sendSYNACK()
 	h.mu.Unlock()
 
-	conn.sendSYNACK()
 	pb.Release()
 }
 

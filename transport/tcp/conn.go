@@ -259,6 +259,7 @@ func (c *TCPConn) ForceClose() error {
 	c.forceCloseOnce.Do(func() {
 		close(c.forceCloseCh)
 	})
+	<-c.done
 	return nil
 }
 
@@ -266,6 +267,8 @@ func (c *TCPConn) forceCloseFromRun() {
 	if c.state == stateEstablished && c.snd != nil {
 		c.sendRSTSegment(c.snd.nxt)
 	}
+	c.writeBuf.CloseWrite()
+	c.readBuf.CloseWrite()
 	c.closeDone()
 }
 
