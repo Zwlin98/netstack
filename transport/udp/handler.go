@@ -67,6 +67,7 @@ func (h *UDPHandler) HandlePacket(pb *packet.PacketBuffer) {
 
 	// Copy payload into pooled RefBuf — PacketBuffer is released after this function returns.
 	ref := packet.GetRefBuf()
+	ref.EnsureCapacity(len(payload))
 	copy(ref.Buf(), payload)
 	ref.SetLen(len(payload))
 

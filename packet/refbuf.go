@@ -14,14 +14,14 @@ const (
 // the same data without copying. The buffer is returned to the pool when
 // the last reference is released via DecRef.
 type RefBuf struct {
-	buf [MaxPayloadSize]byte
+	buf []byte
 	len int
 	ref atomic.Int32
 }
 
 var refBufPool = sync.Pool{
 	New: func() any {
-		return &RefBuf{}
+		return &RefBuf{buf: make([]byte, MaxPayloadSize)}
 	},
 }
 
@@ -43,6 +43,9 @@ func (rb *RefBuf) IncRef() {
 func (rb *RefBuf) DecRef() {
 	if rb.ref.Add(-1) == 0 {
 		rb.len = 0
+		if cap(rb.buf) > MaxPayloadSize {
+			rb.buf = make([]byte, MaxPayloadSize)
+		}
 		refBufPool.Put(rb)
 	}
 }
@@ -50,6 +53,14 @@ func (rb *RefBuf) DecRef() {
 // Buf returns the full backing array for writing data into.
 func (rb *RefBuf) Buf() []byte {
 	return rb.buf[:]
+}
+
+// EnsureCapacity grows the buffer when a reassembled datagram exceeds the
+// default MTU-sized backing store.
+func (rb *RefBuf) EnsureCapacity(n int) {
+	if len(rb.buf) < n {
+		rb.buf = make([]byte, n)
+	}
 }
 
 // Bytes returns the valid data region buf[:len].

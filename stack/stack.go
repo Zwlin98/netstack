@@ -32,6 +32,8 @@ type Stack struct {
 
 	handlers map[tcpip.TransportProtocolNumber]TransportHandler
 
+	fragments *ipv4Reassembler
+
 	ttl uint8
 
 	stats *Stats
@@ -55,6 +57,7 @@ func New(ch channel.Channel, opts ...Option) *Stack {
 		channel:    ch,
 		outboundCh: make(chan outboundItem, cfg.OutboundQueueSize),
 		handlers:   make(map[tcpip.TransportProtocolNumber]TransportHandler),
+		fragments:  newIPv4Reassembler(),
 		ttl:        cfg.TTL,
 		done:       make(chan struct{}),
 	}
@@ -165,6 +168,13 @@ func (s *Stack) readLoop() {
 			pb.Release()
 			continue
 		}
+		totalLen := int(ipHdr.TotalLength())
+		if totalLen < hdrLen || totalLen > len(raw) {
+			pb.Release()
+			continue
+		}
+		raw = raw[:totalLen]
+		ipHdr = header.IPv4(raw)
 
 		// Validate IP header checksum.
 		if header.Checksum(raw[:hdrLen], 0) != 0 {
@@ -174,6 +184,15 @@ func (s *Stack) readLoop() {
 
 		pb.NetworkHeader = raw[:hdrLen]
 		pb.Data = raw[hdrLen:]
+
+		if ipHdr.More() || ipHdr.FragmentOffset() != 0 {
+			complete, ok := s.fragments.process(pb, ipHdr)
+			if !ok {
+				continue
+			}
+			pb = complete
+			ipHdr = header.IPv4(pb.NetworkHeader)
+		}
 
 		proto := ipHdr.Protocol()
 
