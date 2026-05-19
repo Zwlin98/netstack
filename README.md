@@ -271,9 +271,9 @@ if snap := tcpHandler.ConnSnapshot(flow); snap != nil {
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `PacketsIn` | `atomic.Uint64` | 收到的有效 IPv4 包总数 |
+| `PacketsIn` | `atomic.Uint64` | 收到的有效 IPv4 输入包总数（分片按每个 fragment 计数） |
 | `PacketsOut` | `atomic.Uint64` | 发出的包总数 |
-| `BytesIn` | `atomic.Uint64` | 收到的原始字节数（含所有头部） |
+| `BytesIn` | `atomic.Uint64` | 收到的 IPv4 输入字节数（按 `TotalLength`，分片按每个 fragment 计数，含头部） |
 | `BytesOut` | `atomic.Uint64` | 发出的原始字节数（含所有头部） |
 | `DroppedOutbound` | `atomic.Uint64` | 因出站队列满而丢弃的包 |
 | `UnknownProtocol` | `atomic.Uint64` | 无注册处理器的协议包 |
@@ -333,7 +333,7 @@ if snap := tcpHandler.ConnSnapshot(flow); snap != nil {
 
 ## 注意事项
 
-- **不支持 IP 分片与重组** — TCP 通过 MSS 协商避免分片，UDP 拒绝超过 MTU 的数据报；收到的 IP 分片会被静默丢弃
+- **IPv4 分片支持有限** — 支持入站 IPv4 fragment reassembly；不支持出站分片，TCP 通过 MSS 协商避免分片，UDP 拒绝超过 MTU 的出站数据报
 - **不支持 IPv6** — 仅处理 IPv4 流量
 - **仅被动 TCP** — 只支持 Listen/Accept，不支持主动发起连接（无 Dial/Connect/SYN_SENT）
 - **MTU 上限 1500** — 不支持巨帧（Jumbo Frame）

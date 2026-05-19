@@ -12,6 +12,11 @@ const (
 	IPv4Version       = 4
 )
 
+const (
+	IPv4FlagMoreFragments = 1 << iota
+	IPv4FlagDontFragment
+)
+
 // IPv4 byte offsets.
 const (
 	ipv4VersionIHL    = 0
@@ -88,6 +93,11 @@ func (b IPv4) Flags() uint8 {
 	return b[ipv4FlagsFragment] >> 5
 }
 
+// More reports whether the more fragments flag is set.
+func (b IPv4) More() bool {
+	return b.Flags()&IPv4FlagMoreFragments != 0
+}
+
 // FragmentOffset returns the 13-bit fragment offset (in 8-byte units).
 func (b IPv4) FragmentOffset() uint16 {
 	return binary.BigEndian.Uint16(b[ipv4FlagsFragment:]) & 0x1fff
@@ -136,6 +146,12 @@ func (b IPv4) SetID(id uint16) {
 // SetFlags sets the 3-bit flags field.
 func (b IPv4) SetFlags(flags uint8) {
 	b[ipv4FlagsFragment] = (flags << 5) | (b[ipv4FlagsFragment] & 0x1f)
+}
+
+// SetFlagsFragmentOffset sets the flags and fragment offset fields.
+func (b IPv4) SetFlagsFragmentOffset(flags uint8, offset uint16) {
+	flagsFrag := uint16(flags)<<13 | (offset & 0x1fff)
+	binary.BigEndian.PutUint16(b[ipv4FlagsFragment:], flagsFrag)
 }
 
 // Encode fills all fields from an IPv4Fields struct.
