@@ -87,6 +87,7 @@ func (pb *PacketBuffer) Buf() []byte {
 // AppendData copies payload data into the buffer area after headroom.
 // Must be called before Prepend so headers and data are contiguous.
 func (pb *PacketBuffer) AppendData(data []byte) {
+	pb.ensureCapacity(pb.headroom + len(data))
 	pb.Data = pb.buf[pb.headroom : pb.headroom+len(data)]
 	copy(pb.Data, data)
 }

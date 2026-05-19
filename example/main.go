@@ -19,16 +19,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"strings"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Zwlin98/netstack/channel/tun"
+	"github.com/Zwlin98/netstack/header"
 	"github.com/Zwlin98/netstack/stack"
 	"github.com/Zwlin98/netstack/tcpip"
 	"github.com/Zwlin98/netstack/transport/tcp"
@@ -36,9 +37,9 @@ import (
 )
 
 var (
-	tunName    = flag.String("tun", "tun0", "TUN device name")
-	tunMTU     = flag.Int("mtu", 1500, "TUN MTU")
-	tunSubnet  = flag.String("subnet", "10.0.0.0/24", "route subnet for TUN device")
+	tunName     = flag.String("tun", "tun0", "TUN device name")
+	tunMTU      = flag.Int("mtu", 1500, "TUN MTU")
+	tunSubnet   = flag.String("subnet", "10.0.0.0/24", "route subnet for TUN device")
 	forwardAddr = flag.String("forward", "", "forward all TCP to this address (e.g. host:5201)")
 	readDelay   = flag.Duration("read-delay", 0, "delay between reads in echo handler (e.g. 50ms)")
 	statsFlag   = flag.Bool("stats", false, "enable stats and log periodically")
@@ -158,7 +159,7 @@ func tcpForward(ln *tcp.TCPListener, addr string) {
 }
 
 func udpEcho(h *udp.UDPHandler) {
-	buf := make([]byte, 4096)
+	buf := make([]byte, 0xffff-header.IPv4MinHeaderSize-header.UDPHeaderSize)
 	for {
 		n, src, dst, err := h.ReadFrom(buf)
 		if err != nil {

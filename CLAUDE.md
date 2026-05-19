@@ -47,7 +47,7 @@ This is a **server-only LAN gateway**. Clients connect to the TUN device over a 
 - ECN, PMTUD, cwnd decay — LAN path has fixed MTU, low latency, minimal congestion
 - F-RTO, PRR, RST rate limiting — not useful for LAN
 - CUBIC/BBR, TFO — beyond current needs
-- IP fragmentation/reassembly — LAN MTU is fixed, TCP uses MSS negotiation, UDP rejects oversized datagrams
+- PMTUD and advanced fragmentation policy — LAN MTU is fixed; inbound reassembly and basic outbound IPv4 fragmentation exist, while TCP relies on MSS/GSO and UDP uses IPv4 fragmentation for oversized datagrams
 
 ## Coding Conventions
 

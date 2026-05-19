@@ -343,3 +343,86 @@ func TestIPv4TotalLengthTrimsTrailingBytes(t *testing.T) {
 		t.Fatal("timed out waiting for packet")
 	}
 }
+
+func TestIPv4OutboundFragmentsOversizedPacket(t *testing.T) {
+	const mtu = 600
+	ch := channel.NewMemory(mtu)
+	s := New(ch)
+	stats := s.EnableStats()
+	s.Start()
+	defer s.Stop()
+
+	src := tcpip.From4(10, 0, 0, 2)
+	dst := tcpip.From4(10, 0, 0, 1)
+	payload := make([]byte, 1600)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	pb := packet.NewPacketBuffer(header.IPv4MinHeaderSize)
+	pb.AppendData(payload)
+	s.SendPacket(pb, src, dst, tcpip.TransportProtocolNumber(99))
+
+	maxFragPayload := (mtu - header.IPv4MinHeaderSize) &^ 7
+	wantFragments := (len(payload) + maxFragPayload - 1) / maxFragPayload
+	reassembled := make([]byte, 0, len(payload))
+	var id uint16
+	var wireBytes int
+
+	for i := 0; i < wantFragments; i++ {
+		frag := ch.Read(time.Second)
+		if frag == nil {
+			t.Fatalf("timed out waiting for fragment %d", i)
+		}
+		if len(frag) > mtu {
+			t.Fatalf("fragment %d len = %d, want <= %d", i, len(frag), mtu)
+		}
+		wireBytes += len(frag)
+
+		ip := header.IPv4(frag)
+		hdrLen := ip.HeaderLength()
+		if ip.SourceAddress() != src || ip.DestinationAddress() != dst {
+			t.Fatalf("fragment %d addresses = %s -> %s, want %s -> %s", i, ip.SourceAddress(), ip.DestinationAddress(), src, dst)
+		}
+		if ip.Protocol() != tcpip.TransportProtocolNumber(99) {
+			t.Fatalf("fragment %d protocol = %d", i, ip.Protocol())
+		}
+		if int(ip.TotalLength()) != len(frag) {
+			t.Fatalf("fragment %d total length = %d, want %d", i, ip.TotalLength(), len(frag))
+		}
+		if header.Checksum(frag[:hdrLen], 0) != 0 {
+			t.Fatalf("fragment %d IPv4 checksum invalid", i)
+		}
+		if i == 0 {
+			id = ip.ID()
+		} else if ip.ID() != id {
+			t.Fatalf("fragment %d ID = 0x%04x, want 0x%04x", i, ip.ID(), id)
+		}
+		if got, want := int(ip.FragmentOffset())*8, len(reassembled); got != want {
+			t.Fatalf("fragment %d offset = %d, want %d", i, got, want)
+		}
+
+		fragPayload := frag[hdrLen:]
+		if i < wantFragments-1 {
+			if !ip.More() {
+				t.Fatalf("fragment %d missing more-fragments flag", i)
+			}
+			if len(fragPayload)%8 != 0 {
+				t.Fatalf("fragment %d payload len = %d, want 8-byte aligned", i, len(fragPayload))
+			}
+		} else if ip.More() {
+			t.Fatalf("final fragment has more-fragments flag")
+		}
+		reassembled = append(reassembled, fragPayload...)
+	}
+
+	if string(reassembled) != string(payload) {
+		t.Fatalf("reassembled outbound payload mismatch: got %d bytes want %d", len(reassembled), len(payload))
+	}
+	if got := stats.PacketsOut.Load(); got != uint64(wantFragments) {
+		t.Fatalf("PacketsOut = %d, want %d fragments", got, wantFragments)
+	}
+	if got := stats.BytesOut.Load(); got != uint64(wireBytes) {
+		t.Fatalf("BytesOut = %d, want %d wire bytes", got, wireBytes)
+	}
+}

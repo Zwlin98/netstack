@@ -150,7 +150,7 @@ func (s *sender) sendPending(conn *TCPConn) {
 		if conn.handler.gsoWriter != nil && available > s.mss && windowLeft > s.mss {
 			buf := packet.GetGSOBuf()
 			dataOffset := conn.gsoDataOffset()
-			gsoSize := min(windowLeft, available, conn.handler.gsoMaxSize, packet.GSOBufSize-dataOffset)
+			gsoSize := min(windowLeft, available, conn.handler.gsoMaxSize, 0xffff-dataOffset, packet.GSOBufSize-dataOffset)
 			n := conn.writeBuf.ReadNoBlock(buf[dataOffset : dataOffset+gsoSize])
 			if n == 0 {
 				packet.PutGSOBuf(buf)

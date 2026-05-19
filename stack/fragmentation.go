@@ -215,3 +215,59 @@ func (r *ipv4Reassembler) releaseSetLocked(key ipv4FragmentKey, set *ipv4Fragmen
 		r.mem = 0
 	}
 }
+
+func fragmentIPv4Packet(pkt []byte, mtu int) ([][]byte, bool) {
+	if len(pkt) < header.IPv4MinHeaderSize {
+		return nil, false
+	}
+
+	ipHdr := header.IPv4(pkt)
+	hdrLen := ipHdr.HeaderLength()
+	totalLen := int(ipHdr.TotalLength())
+	if hdrLen < header.IPv4MinHeaderSize || hdrLen > len(pkt) || totalLen < hdrLen || totalLen > len(pkt) {
+		return nil, false
+	}
+	if totalLen <= mtu {
+		return [][]byte{pkt[:totalLen]}, true
+	}
+	if ipHdr.Flags()&header.IPv4FlagDontFragment != 0 || mtu <= hdrLen {
+		return nil, false
+	}
+
+	maxPayload := (mtu - hdrLen) &^ 7
+	if maxPayload <= 0 {
+		return nil, false
+	}
+
+	payload := pkt[hdrLen:totalLen]
+	fragments := make([][]byte, 0, (len(payload)+maxPayload-1)/maxPayload)
+	baseFlags := ipHdr.Flags() &^ header.IPv4FlagMoreFragments
+
+	for offset := 0; offset < len(payload); offset += maxPayload {
+		fragPayloadLen := len(payload) - offset
+		more := false
+		if fragPayloadLen > maxPayload {
+			fragPayloadLen = maxPayload
+			more = true
+		}
+
+		fragLen := hdrLen + fragPayloadLen
+		frag := make([]byte, fragLen)
+		copy(frag[:hdrLen], pkt[:hdrLen])
+		copy(frag[hdrLen:], payload[offset:offset+fragPayloadLen])
+
+		fragHdr := header.IPv4(frag)
+		fragHdr.SetTotalLength(uint16(fragLen))
+		flags := baseFlags
+		if more {
+			flags |= header.IPv4FlagMoreFragments
+		}
+		fragHdr.SetFlagsFragmentOffset(flags, uint16(offset/8))
+		fragHdr.SetChecksum(0)
+		fragHdr.SetChecksum(header.Checksum(frag[:hdrLen], 0))
+
+		fragments = append(fragments, frag)
+	}
+
+	return fragments, true
+}

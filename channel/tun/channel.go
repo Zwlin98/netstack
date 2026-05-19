@@ -36,7 +36,6 @@ func NewChannel(name string, mtu int) (*TUNChannel, error) {
 	return newChannel(t), nil
 }
 
-
 func newChannel(t *nativeTun) *TUNChannel {
 	bs := t.batchSize()
 	bufs := make([][]byte, bs)

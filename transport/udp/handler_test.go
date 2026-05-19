@@ -291,7 +291,7 @@ func TestNoGoroutineLeak(t *testing.T) {
 	}
 }
 
-func TestWriteToMaxPayload(t *testing.T) {
+func TestWriteToMTUSizedPayload(t *testing.T) {
 	s, ch, h := setupStack()
 	defer s.Stop()
 	defer h.Close()
@@ -299,7 +299,7 @@ func TestWriteToMaxPayload(t *testing.T) {
 	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
 	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
 
-	// Exactly at the limit: MTU(1500) - IPv4(20) - UDP(8) = 1472.
+	// Exactly one MTU-sized UDP payload: MTU(1500) - IPv4(20) - UDP(8) = 1472.
 	payload := make([]byte, 1472)
 	for i := range payload {
 		payload[i] = byte(i)
@@ -307,7 +307,7 @@ func TestWriteToMaxPayload(t *testing.T) {
 
 	n, err := h.WriteTo(payload, src, dst)
 	if err != nil {
-		t.Fatalf("WriteTo with max payload: %v", err)
+		t.Fatalf("WriteTo with MTU-sized payload: %v", err)
 	}
 	if n != len(payload) {
 		t.Errorf("WriteTo returned %d, want %d", n, len(payload))
@@ -326,6 +326,30 @@ func TestWriteToMaxPayload(t *testing.T) {
 	}
 }
 
+func TestWriteToMaxIPv4Payload(t *testing.T) {
+	s, ch, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
+	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
+	payload := make([]byte, maxIPv4UDPPayload)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	n, err := h.WriteTo(payload, src, dst)
+	if err != nil {
+		t.Fatalf("WriteTo with max IPv4 UDP payload: %v", err)
+	}
+	if n != len(payload) {
+		t.Fatalf("WriteTo returned %d, want %d", n, len(payload))
+	}
+
+	udpPacket := readFragmentedUDPFromMemory(t, ch)
+	validateOutboundUDPPacket(t, udpPacket, src, dst, payload)
+}
+
 func TestWriteToOversized(t *testing.T) {
 	s, _, h := setupStack()
 	defer s.Stop()
@@ -334,14 +358,200 @@ func TestWriteToOversized(t *testing.T) {
 	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
 	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
 
-	// One byte over the limit.
-	payload := make([]byte, 1473)
+	// One byte over the IPv4 UDP payload limit.
+	payload := make([]byte, maxIPv4UDPPayload+1)
 	n, err := h.WriteTo(payload, src, dst)
 	if err != ErrMessageTooLong {
 		t.Fatalf("WriteTo returned error %v, want ErrMessageTooLong", err)
 	}
 	if n != 0 {
 		t.Errorf("WriteTo returned n=%d, want 0", n)
+	}
+}
+
+func TestWriteToLargeFragmentsWithoutGSO(t *testing.T) {
+	s, ch, h := setupStack()
+	defer s.Stop()
+	defer h.Close()
+
+	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
+	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	n, err := h.WriteTo(payload, src, dst)
+	if err != nil {
+		t.Fatalf("WriteTo large payload: %v", err)
+	}
+	if n != len(payload) {
+		t.Fatalf("WriteTo returned %d, want %d", n, len(payload))
+	}
+
+	udpPacket := readFragmentedUDPFromMemory(t, ch)
+	validateOutboundUDPPacket(t, udpPacket, src, dst, payload)
+}
+
+func readFragmentedUDPFromMemory(t *testing.T, ch *channel.MemoryChannel) []byte {
+	t.Helper()
+
+	var udpPacket []byte
+	var id uint16
+	for i := 0; ; i++ {
+		frag := ch.Read(time.Second)
+		if frag == nil {
+			t.Fatalf("timed out waiting for fragment %d", i)
+		}
+		if len(frag) > 1500 {
+			t.Fatalf("fragment %d len = %d, want <= MTU", i, len(frag))
+		}
+
+		ip := header.IPv4(frag)
+		hdrLen := ip.HeaderLength()
+		if header.Checksum(frag[:hdrLen], 0) != 0 {
+			t.Fatalf("fragment %d IPv4 checksum invalid", i)
+		}
+		if i == 0 {
+			id = ip.ID()
+		} else if ip.ID() != id {
+			t.Fatalf("fragment %d ID = 0x%04x, want 0x%04x", i, ip.ID(), id)
+		}
+		if got, want := int(ip.FragmentOffset())*8, len(udpPacket); got != want {
+			t.Fatalf("fragment %d offset = %d, want %d", i, got, want)
+		}
+
+		udpPacket = append(udpPacket, frag[hdrLen:]...)
+		if !ip.More() {
+			break
+		}
+	}
+	return udpPacket
+}
+
+func validateOutboundUDPPacket(t *testing.T, udpPacket []byte, src, dst tcpip.FullAddress, payload []byte) {
+	t.Helper()
+
+	udpHdr := header.UDP(udpPacket)
+	if udpHdr.SourcePort() != src.Port || udpHdr.DestinationPort() != dst.Port {
+		t.Fatalf("UDP ports = %d -> %d, want %d -> %d", udpHdr.SourcePort(), udpHdr.DestinationPort(), src.Port, dst.Port)
+	}
+	if got, want := int(udpHdr.Length()), header.UDPHeaderSize+len(payload); got != want {
+		t.Fatalf("UDP length = %d, want %d", got, want)
+	}
+	if !bytes.Equal(udpHdr.Payload(), payload) {
+		t.Fatalf("UDP payload mismatch: got %d bytes want %d", len(udpHdr.Payload()), len(payload))
+	}
+	phc := header.PseudoHeaderChecksum(tcpip.UDPProtocolNumber, src.Addr, dst.Addr, uint16(len(udpPacket)))
+	if header.Checksum(udpPacket, phc) != 0 {
+		t.Fatal("UDP checksum invalid after reassembly")
+	}
+}
+
+type udpGSOWriterTestChannel struct {
+	*channel.MemoryChannel
+	gsoCh chan udpGSOCapture
+}
+
+type udpGSOCapture struct {
+	data []byte
+	opts channel.PacketOptions
+}
+
+func newUDPGSOWriterTestChannel(mtu int) *udpGSOWriterTestChannel {
+	return &udpGSOWriterTestChannel{
+		MemoryChannel: channel.NewMemory(mtu),
+		gsoCh:         make(chan udpGSOCapture, 16),
+	}
+}
+
+func (c *udpGSOWriterTestChannel) WritePacketGSO(data []byte, opts channel.PacketOptions) error {
+	pkt := make([]byte, len(data))
+	copy(pkt, data)
+	c.gsoCh <- udpGSOCapture{data: pkt, opts: opts}
+	return nil
+}
+
+func (c *udpGSOWriterTestChannel) GSOEnabled() bool { return true }
+func (c *udpGSOWriterTestChannel) GSOMaxSize() int  { return maxIPv4UDPPayload }
+
+func (c *udpGSOWriterTestChannel) readGSO(timeout time.Duration) *udpGSOCapture {
+	select {
+	case cap := <-c.gsoCh:
+		return &cap
+	case <-time.After(timeout):
+		return nil
+	}
+}
+
+func TestWriteToLargeFragmentsWithGSOWriter(t *testing.T) {
+	ch := newUDPGSOWriterTestChannel(1500)
+	s := stack.New(ch)
+	h := NewUDPHandler(s)
+	s.RegisterHandler(tcpip.UDPProtocolNumber, h)
+	s.Start()
+	defer s.Stop()
+	defer h.Close()
+
+	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
+	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte(255 - i)
+	}
+
+	n, err := h.WriteTo(payload, src, dst)
+	if err != nil {
+		t.Fatalf("WriteTo large payload: %v", err)
+	}
+	if n != len(payload) {
+		t.Fatalf("WriteTo returned %d, want %d", n, len(payload))
+	}
+
+	var udpPacket []byte
+	var id uint16
+	for i := 0; ; i++ {
+		cap := ch.readGSO(time.Second)
+		if cap == nil {
+			t.Fatalf("timed out waiting for fragment %d", i)
+		}
+		if cap.opts.GSOType != channel.GSONone {
+			t.Fatalf("fragment %d GSOType = 0x%02x, want GSONone", i, cap.opts.GSOType)
+		}
+		if len(cap.data) > 1500 {
+			t.Fatalf("fragment %d len = %d, want <= MTU", i, len(cap.data))
+		}
+
+		ip := header.IPv4(cap.data)
+		hdrLen := ip.HeaderLength()
+		if i == 0 {
+			id = ip.ID()
+		} else if ip.ID() != id {
+			t.Fatalf("fragment %d ID = 0x%04x, want 0x%04x", i, ip.ID(), id)
+		}
+		if got, want := int(ip.FragmentOffset())*8, len(udpPacket); got != want {
+			t.Fatalf("fragment %d offset = %d, want %d", i, got, want)
+		}
+
+		udpPacket = append(udpPacket, cap.data[hdrLen:]...)
+		if !ip.More() {
+			break
+		}
+	}
+
+	udpHdr := header.UDP(udpPacket)
+	if udpHdr.SourcePort() != src.Port || udpHdr.DestinationPort() != dst.Port {
+		t.Fatalf("UDP ports = %d -> %d, want %d -> %d", udpHdr.SourcePort(), udpHdr.DestinationPort(), src.Port, dst.Port)
+	}
+	if got, want := int(udpHdr.Length()), header.UDPHeaderSize+len(payload); got != want {
+		t.Fatalf("UDP length = %d, want %d", got, want)
+	}
+	if !bytes.Equal(udpHdr.Payload(), payload) {
+		t.Fatalf("UDP payload mismatch: got %d bytes want %d", len(udpHdr.Payload()), len(payload))
+	}
+	phc := header.PseudoHeaderChecksum(tcpip.UDPProtocolNumber, src.Addr, dst.Addr, uint16(len(udpPacket)))
+	if header.Checksum(udpPacket, phc) != 0 {
+		t.Fatal("UDP checksum invalid after reassembly")
 	}
 }
 
@@ -377,7 +587,7 @@ func TestWriteToOversizedStats(t *testing.T) {
 	src := tcpip.FullAddress{Addr: tcpip.From4(8, 8, 8, 8), Port: 53}
 	dst := tcpip.FullAddress{Addr: tcpip.From4(10, 0, 0, 1), Port: 12345}
 
-	payload := make([]byte, 1473)
+	payload := make([]byte, maxIPv4UDPPayload+1)
 	h.WriteTo(payload, src, dst)
 	h.WriteTo(payload, src, dst)
 

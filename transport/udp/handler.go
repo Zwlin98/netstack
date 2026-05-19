@@ -12,11 +12,13 @@ import (
 	"github.com/Zwlin98/netstack/tcpip"
 )
 
+const maxIPv4UDPPayload = 0xffff - header.IPv4MinHeaderSize - header.UDPHeaderSize
+
 var (
 	errClosed = errors.New("udp: handler closed")
 
 	// ErrMessageTooLong is returned by WriteTo when the payload exceeds the
-	// maximum UDP payload size allowed by the stack's MTU.
+	// maximum UDP payload size representable by IPv4.
 	ErrMessageTooLong = errors.New("udp: message too long")
 )
 
@@ -36,7 +38,7 @@ type UDPHandler struct {
 	done       chan struct{}
 	once       sync.Once
 	stats      *Stats
-	maxPayload int // max UDP payload bytes (MTU - IPv4 - UDP headers)
+	maxPayload int // max UDP payload bytes for IPv4
 }
 
 // NewUDPHandler creates a UDPHandler.
@@ -45,12 +47,13 @@ func NewUDPHandler(s *stack.Stack, opts ...Option) *UDPHandler {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	return &UDPHandler{
+	h := &UDPHandler{
 		stk:        s,
 		inbound:    make(chan udpDatagram, cfg.InboundQueueSize),
 		done:       make(chan struct{}),
-		maxPayload: s.MTU() - header.IPv4MinHeaderSize - header.UDPHeaderSize,
+		maxPayload: maxIPv4UDPPayload,
 	}
+	return h
 }
 
 // HandlePacket processes an inbound UDP packet from the stack.
@@ -134,8 +137,7 @@ func (h *UDPHandler) WriteTo(b []byte, src, dst tcpip.FullAddress) (int, error) 
 	pb := packet.NewPacketBuffer(headroom)
 
 	// Write payload.
-	pb.Data = pb.Buf()[:len(b)]
-	copy(pb.Data, b)
+	pb.AppendData(b)
 
 	// Prepend UDP header.
 	udpTotalLen := uint16(header.UDPHeaderSize + len(b))

@@ -3,6 +3,7 @@ package stack
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Zwlin98/netstack/channel"
 	"github.com/Zwlin98/netstack/header"
@@ -19,9 +20,10 @@ type TransportHandler interface {
 
 // outboundItem carries either a normal PacketBuffer or a GSO buffer through the outbound queue.
 type outboundItem struct {
-	pb      *packet.PacketBuffer  // non-nil for normal packets
-	gsoBuf  []byte                // non-nil for GSO packets (from pool)
-	gsoOpts channel.PacketOptions // meaningful when gsoBuf != nil
+	pb         *packet.PacketBuffer  // non-nil for normal packets
+	gsoBuf     []byte                // packet view for GSO writes
+	gsoPoolBuf []byte                // original buffer to return to the GSO pool
+	gsoOpts    channel.PacketOptions // meaningful when gsoBuf != nil
 }
 
 // Stack is the central network stack that reads packets from a Channel,
@@ -33,6 +35,7 @@ type Stack struct {
 	handlers map[tcpip.TransportProtocolNumber]TransportHandler
 
 	fragments *ipv4Reassembler
+	ipv4ID    atomic.Uint32
 
 	ttl uint8
 
@@ -92,12 +95,26 @@ func (s *Stack) MTU() int {
 	return s.channel.MTU()
 }
 
+func (s *Stack) nextIPv4ID() uint16 {
+	return uint16(s.ipv4ID.Add(1))
+}
+
 // SendPacket prepends an IPv4 header and enqueues the packet for sending.
 func (s *Stack) SendPacket(pb *packet.PacketBuffer, src, dst tcpip.Address, proto tcpip.TransportProtocolNumber) {
 	ipSlice := pb.Prepend(header.IPv4MinHeaderSize)
+	totalLen := len(pb.AsSlice())
+	if totalLen > 0xffff {
+		if st := s.stats; st != nil {
+			st.DroppedOutbound.Add(1)
+		}
+		pb.Release()
+		return
+	}
+
 	ip := header.IPv4(ipSlice)
 	ip.Encode(&header.IPv4Fields{
-		TotalLength: uint16(len(pb.AsSlice())),
+		TotalLength: uint16(totalLen),
+		ID:          s.nextIPv4ID(),
 		TTL:         s.ttl,
 		Protocol:    proto,
 		SrcAddr:     src,
@@ -119,10 +136,19 @@ func (s *Stack) SendPacket(pb *packet.PacketBuffer, src, dst tcpip.Address, prot
 // with PacketOptions for the write loop. The buffer must have at least
 // header.IPv4MinHeaderSize bytes of headroom before the data at buf[ipOffset:].
 func (s *Stack) SendPacketGSO(buf []byte, ipOffset int, totalLen int, src, dst tcpip.Address, proto tcpip.TransportProtocolNumber, opts channel.PacketOptions) {
+	if totalLen > 0xffff {
+		if st := s.stats; st != nil {
+			st.DroppedOutbound.Add(1)
+		}
+		packet.PutGSOBuf(buf)
+		return
+	}
+
 	ipSlice := buf[ipOffset : ipOffset+header.IPv4MinHeaderSize]
 	ip := header.IPv4(ipSlice)
 	ip.Encode(&header.IPv4Fields{
 		TotalLength: uint16(totalLen),
+		ID:          s.nextIPv4ID(),
 		TTL:         s.ttl,
 		Protocol:    proto,
 		SrcAddr:     src,
@@ -133,7 +159,7 @@ func (s *Stack) SendPacketGSO(buf []byte, ipOffset int, totalLen int, src, dst t
 
 	pkt := buf[ipOffset : ipOffset+totalLen]
 	select {
-	case s.outboundCh <- outboundItem{gsoBuf: pkt, gsoOpts: opts}:
+	case s.outboundCh <- outboundItem{gsoBuf: pkt, gsoPoolBuf: buf, gsoOpts: opts}:
 	case <-s.done:
 		packet.PutGSOBuf(buf)
 	}
@@ -224,30 +250,60 @@ func (s *Stack) writeLoop() {
 		select {
 		case item := <-s.outboundCh:
 			if item.gsoBuf != nil {
-				if st := s.stats; st != nil {
-					st.PacketsOut.Add(1)
-					st.BytesOut.Add(uint64(len(item.gsoBuf)))
-				}
-				// GSO packet — write with offload metadata, then return buffer to pool.
-				gw.WritePacketGSO(item.gsoBuf, item.gsoOpts)
-				packet.PutGSOBuf(item.gsoBuf)
-			} else if gsoOK {
-				if st := s.stats; st != nil {
-					st.PacketsOut.Add(1)
-					st.BytesOut.Add(uint64(len(item.pb.AsSlice())))
-				}
-				gw.WritePacketGSO(item.pb.AsSlice(), channel.PacketOptions{})
-				item.pb.Release()
-			} else {
-				if st := s.stats; st != nil {
-					st.PacketsOut.Add(1)
-					st.BytesOut.Add(uint64(len(item.pb.AsSlice())))
-				}
-				s.channel.WritePacket(item.pb.AsSlice())
-				item.pb.Release()
+				s.writeGSOItem(item, gw, gsoOK)
+				continue
 			}
+			s.writePacket(item.pb.AsSlice(), gw, gsoOK)
+			item.pb.Release()
 		case <-s.done:
 			return
 		}
+	}
+}
+
+func (s *Stack) writeGSOItem(item outboundItem, gw channel.GSOWriter, gsoOK bool) {
+	defer packet.PutGSOBuf(item.gsoPoolBuf)
+	if !gsoOK {
+		if st := s.stats; st != nil {
+			st.DroppedOutbound.Add(1)
+		}
+		return
+	}
+	s.countPacketOut(len(item.gsoBuf))
+	_ = gw.WritePacketGSO(item.gsoBuf, item.gsoOpts)
+}
+
+func (s *Stack) writePacket(data []byte, gw channel.GSOWriter, gsoOK bool) {
+	mtu := s.channel.MTU()
+	if mtu <= 0 || len(data) <= mtu {
+		s.writeWirePacket(data, gw, gsoOK)
+		return
+	}
+
+	fragments, ok := fragmentIPv4Packet(data, mtu)
+	if !ok {
+		if st := s.stats; st != nil {
+			st.DroppedOutbound.Add(1)
+		}
+		return
+	}
+	for _, frag := range fragments {
+		s.writeWirePacket(frag, gw, gsoOK)
+	}
+}
+
+func (s *Stack) writeWirePacket(data []byte, gw channel.GSOWriter, gsoOK bool) {
+	s.countPacketOut(len(data))
+	if gsoOK {
+		_ = gw.WritePacketGSO(data, channel.PacketOptions{})
+		return
+	}
+	_ = s.channel.WritePacket(data)
+}
+
+func (s *Stack) countPacketOut(n int) {
+	if st := s.stats; st != nil {
+		st.PacketsOut.Add(1)
+		st.BytesOut.Add(uint64(n))
 	}
 }
