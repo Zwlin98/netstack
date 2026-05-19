@@ -22,6 +22,24 @@ func (h *captureHandler) HandlePacket(pb *packet.PacketBuffer) {
 	h.ch <- data
 }
 
+type capturePacketHandler struct {
+	ch chan capturedPacket
+}
+
+type capturedPacket struct {
+	header []byte
+	data   []byte
+}
+
+func (h *capturePacketHandler) HandlePacket(pb *packet.PacketBuffer) {
+	defer pb.Release()
+	pkt := capturedPacket{
+		header: append([]byte(nil), pb.NetworkHeader...),
+		data:   append([]byte(nil), pb.Data...),
+	}
+	h.ch <- pkt
+}
+
 func buildIPv4Fragment(src, dst tcpip.Address, id uint16, proto tcpip.TransportProtocolNumber, offset int, more bool, payload []byte) []byte {
 	totalLen := header.IPv4MinHeaderSize + len(payload)
 	buf := make([]byte, totalLen)
@@ -96,6 +114,53 @@ func TestIPv4FragmentReassemblyOutOfOrder(t *testing.T) {
 	}
 }
 
+func TestIPv4FragmentReassemblyThreeFragmentsWithDuplicate(t *testing.T) {
+	ch := channel.NewMemory(1500)
+	s := New(ch)
+	h := &capturePacketHandler{ch: make(chan capturedPacket, 1)}
+	s.RegisterHandler(tcpip.UDPProtocolNumber, h)
+	s.Start()
+	defer s.Stop()
+
+	src := tcpip.From4(10, 0, 0, 1)
+	dst := tcpip.From4(30, 1, 2, 3)
+	payload := make([]byte, 3600)
+	for i := range payload {
+		payload[i] = byte(i * 3)
+	}
+	udp := buildUDPDatagram(12345, 443, src, dst, payload)
+
+	firstLen := 1480
+	secondLen := 1480
+	first := buildIPv4Fragment(src, dst, 0x4646, tcpip.UDPProtocolNumber, 0, true, udp[:firstLen])
+	second := buildIPv4Fragment(src, dst, 0x4646, tcpip.UDPProtocolNumber, firstLen, true, udp[firstLen:firstLen+secondLen])
+	third := buildIPv4Fragment(src, dst, 0x4646, tcpip.UDPProtocolNumber, firstLen+secondLen, false, udp[firstLen+secondLen:])
+
+	ch.Inject(second)
+	ch.Inject(second)
+	ch.Inject(third)
+	ch.Inject(first)
+
+	select {
+	case got := <-h.ch:
+		if string(got.data) != string(udp) {
+			t.Fatalf("reassembled payload mismatch: got %d bytes want %d", len(got.data), len(udp))
+		}
+		ip := header.IPv4(got.header)
+		if ip.More() || ip.FragmentOffset() != 0 {
+			t.Fatalf("reassembled packet kept fragmentation fields: more=%v offset=%d", ip.More(), ip.FragmentOffset())
+		}
+		if int(ip.TotalLength()) != len(got.header)+len(got.data) {
+			t.Fatalf("bad total length: got %d want %d", ip.TotalLength(), len(got.header)+len(got.data))
+		}
+		if header.Checksum(got.header, 0) != 0 {
+			t.Fatal("reassembled IPv4 header checksum invalid")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reassembled datagram")
+	}
+}
+
 func TestIPv4FragmentReassemblyDropsOverlap(t *testing.T) {
 	ch := channel.NewMemory(1500)
 	s := New(ch)
@@ -121,6 +186,37 @@ func TestIPv4FragmentReassemblyDropsOverlap(t *testing.T) {
 	case got := <-h.ch:
 		t.Fatalf("unexpected reassembled datagram after overlap: %d bytes", len(got))
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestIPv4FragmentReassemblyRejectsMisalignedNonFinalFragment(t *testing.T) {
+	ch := channel.NewMemory(1500)
+	s := New(ch)
+	h := &captureHandler{ch: make(chan []byte, 1)}
+	s.RegisterHandler(tcpip.UDPProtocolNumber, h)
+	s.Start()
+	defer s.Stop()
+
+	src := tcpip.From4(10, 0, 0, 1)
+	dst := tcpip.From4(30, 1, 2, 3)
+	payload := make([]byte, 2000)
+	udp := buildUDPDatagram(12345, 443, src, dst, payload)
+
+	badFirst := buildIPv4Fragment(src, dst, 0x5656, tcpip.UDPProtocolNumber, 0, true, udp[:1479])
+	final := buildIPv4Fragment(src, dst, 0x5656, tcpip.UDPProtocolNumber, 1480, false, udp[1480:])
+	goodFirst := buildIPv4Fragment(src, dst, 0x5656, tcpip.UDPProtocolNumber, 0, true, udp[:1480])
+
+	ch.Inject(badFirst)
+	ch.Inject(final)
+	ch.Inject(goodFirst)
+
+	select {
+	case got := <-h.ch:
+		if string(got) != string(udp) {
+			t.Fatalf("reassembled payload mismatch after rejecting bad fragment: got %d bytes want %d", len(got), len(udp))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reassembled datagram")
 	}
 }
 
